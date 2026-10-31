@@ -6,7 +6,7 @@ A single-file, client-side generator for printable maze sheets. Runs entirely
 in the browser — no build step, no server, nothing uploaded. Clone the repo and
 open `index.html` locally if you prefer.
 
-![themes](https://img.shields.io/badge/themes-7-blue) ![styles](https://img.shields.io/badge/maze%20styles-5-green)
+![themes](https://img.shields.io/badge/themes-7-blue) ![styles](https://img.shields.io/badge/maze%20styles-6-green)
 
 ## What it does
 
@@ -27,8 +27,8 @@ open `index.html` locally if you prefer.
   All sprites are original pixel art drawn for this project, so the repo can
   stay MIT-licensed. The monster theme is a monster-catching motif, not any
   particular franchise's characters.
-- **5 maze styles**, multi-select and dealt out across the page one per maze:
-  Classic, Loopy, Against the grain, Spiral trap, The lot.
+- **6 maze styles**, multi-select and dealt out across the page one per maze:
+  Classic, Loopy, Against the grain, Spiral trap, Crossroads, The lot.
 - **4 difficulties** plus Ladder, which ramps Easy → Expert down the page.
 - **1–8 mazes per page**, laid out to fit exactly one A4 or US Letter sheet.
 - **Seeded** — the same seed always produces the same sheet.
@@ -99,6 +99,15 @@ textbook depth-first carve, which produces long corridors with few real choices:
   cannot tell by eye which side a spiral passage comes out of.
 - **Off-corner entrance and exit** — removes the "just head for the far corner"
   shortcut, while staying far enough apart to keep the journey long.
+- **Crossroads** — the hard part should be *choosing*, not walking. A maze is
+  easy when a wrong turn dead-ends in one cell, because you reject it without
+  moving. So this type carves pure long corridors, then **loops every short
+  stub back into the maze** instead of leaving it hanging, and widens junctions
+  into four-way crossroads *only where the extra arm leads somewhere far*. The
+  result: measured over all four shapes, the cheapest wrong turn goes from
+  about 1 step to 3, the average cost of a wrong turn roughly doubles, and
+  instantly-rejectable turns fall from ~4 per maze to ~2 (to zero on a large
+  one). Dead ends drop from ~30 to ~3.
 
 Each maze is the best of 16 candidates, scored on *forks along the route* ×
 *how far a wrong turn carries you before it is provably wrong*, with candidates
