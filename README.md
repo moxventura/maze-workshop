@@ -1,7 +1,10 @@
 # Maze Workshop
 
-A single-file, client-side generator for printable maze sheets. Open
-`maze-workshop.html` in a browser — no build step, no server, nothing uploaded.
+**[Open the generator →](https://moxventura.github.io/maze-workshop/)**
+
+A single-file, client-side generator for printable maze sheets. Runs entirely
+in the browser — no build step, no server, nothing uploaded. Clone the repo and
+open `index.html` locally if you prefer.
 
 ![themes: mineshaft, explorer, unicorn, space, dino](https://img.shields.io/badge/themes-5-blue) ![styles](https://img.shields.io/badge/maze%20styles-5-green)
 
@@ -47,4 +50,4 @@ and Jamis Buck's *Mazes for Programmers*.
 
 ## Licence
 
-MIT
+[MIT](LICENSE)
