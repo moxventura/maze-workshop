@@ -160,6 +160,18 @@
     border-radius: 5px; padding: 1px 5px;
   }
   .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  input[type="file"] { font: inherit; font-size: .78rem; color: var(--muted); min-width: 0; flex: 1; }
+  input[type="file"]::file-selector-button {
+    font: inherit; font-size: .78rem; font-family: var(--font-display); font-weight: 700;
+    border: 1px solid var(--line); background: var(--surface-2); color: var(--fg);
+    border-radius: 7px; padding: 4px 8px; margin-right: 7px; cursor: pointer;
+  }
+  #spritePreview img {
+    height: 34px; width: auto; image-rendering: pixelated;
+    background: #fff; border: 1px solid var(--line); border-radius: 7px; padding: 3px;
+  }
+  /* uploaded sprites print as images, so keep them crisp rather than smoothed */
+  .sprite img, svg image { image-rendering: pixelated; }
   .card.playable { cursor: pointer; }
 
   @media print {
@@ -216,6 +228,31 @@
       <fieldset>
         <legend>Theme</legend>
         <div class="chips" id="themeChips"></div>
+      </fieldset>
+
+      <fieldset>
+        <legend>Your own sprites</legend>
+        <div class="row">
+          <label class="inline" for="upStart">Character</label>
+          <input type="file" id="upStart" accept="image/*">
+        </div>
+        <div class="row">
+          <label class="inline" for="upGoal">Goal</label>
+          <input type="file" id="upGoal" accept="image/*">
+        </div>
+        <div class="row">
+          <input type="text" id="spriteUrl" placeholder="…or paste an image URL" aria-label="Sprite image URL">
+          <select id="spriteUrlKind" aria-label="Apply URL to">
+            <option value="start">Character</option>
+            <option value="goal">Goal</option>
+          </select>
+        </div>
+        <div class="row">
+          <button type="button" id="useUrl">Use URL</button>
+          <button type="button" id="clearSprites">Clear</button>
+        </div>
+        <div class="row" id="spritePreview"></div>
+        <p class="hint" id="spriteNote">PNG with transparency works best. Your images stay in this browser — nothing is uploaded, and they are never committed to the repo.</p>
       </fieldset>
 
       <fieldset>
@@ -691,19 +728,6 @@ function spriteSVG(name, pxHeight, outline) {
   return '<svg viewBox="' + vb + '" width="' + ((w + pad * 2) * scale).toFixed(1) + '" height="' + pxHeight.toFixed(1) + '" aria-hidden="true">' + body + "</svg>";
 }
 
-/* the same art drawn inside a maze, in maze units (used for the circle hub) */
-function spriteGroup(name, cx, cy, height) {
-  const art = ART[name], w = art[0].length, h = art.length;
-  const s = height / h, x0 = cx - w * s / 2, y0 = cy - height / 2;
-  let body = "";
-  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
-    const ch = art[y][x];
-    if (ch === ".") continue;
-    body += '<rect x="' + (x0 + x * s).toFixed(3) + '" y="' + (y0 + y * s).toFixed(3) +
-      '" width="' + (s * 1.05).toFixed(3) + '" height="' + (s * 1.05).toFixed(3) + '" fill="' + PAL[ch] + '"/>';
-  }
-  return body;
-}
 
 /* ---------------- themes, shapes, styles, difficulties ---------------- */
 const THEMES = {
@@ -794,7 +818,8 @@ function specFor(diffKey, styleKey, shape, boxW, boxH) {
 function makeGrid(shape, spec, rnd, theme) {
   if (shape === "circle") return circleGrid(spec);
   if (shape === "hex") return hexGrid(spec);
-  if (shape === "picture") return pictureGrid(spec, ART[theme.mask]);
+  if (shape === "picture")
+    return pictureGrid(spec, (CUSTOM.start && CUSTOM.start.mask) || ART[theme.mask]);
   return squareGrid(spec, rnd);
 }
 
@@ -865,7 +890,7 @@ function mazeSVG(g, open, m, theme, showSolution) {
     '" stroke-width="' + lw.toFixed(3) + '" stroke-linecap="round" stroke-linejoin="round"/>';
   out += arrowPath(g.entry, lw, "#0f8a46");
   if (g.exit) out += arrowPath(g.exit, lw, "#d93a3a");
-  if (g.goalInside) out += spriteGroup(theme.goal, g.cx[g.goal], g.cy[g.goal], 1.8);
+  if (g.goalInside) out += inlineSprite("goal", theme, g.cx[g.goal], g.cy[g.goal], 1.8);
   const pad = span * 0.035 + lw;
   const box = [vb[0] - pad, vb[1] - pad, vb[2] + pad * 2, vb[3] + pad * 2].map(v => +v.toFixed(2)).join(" ");
   return '<svg class="maze" viewBox="' + box + '" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Maze puzzle">' + out + "</svg>";
@@ -948,6 +973,37 @@ document.getElementById("shuffle").addEventListener("click", () => {
 const paperSel = document.getElementById("paper");
 paperSel.addEventListener("change", e => { state.paper = e.target.value; render(); });
 document.getElementById("solution").addEventListener("change", e => { state.solution = e.target.checked; render(); });
+
+function wireUpload(id, kind) {
+  document.getElementById(id).addEventListener("change", e => {
+    const f = e.target.files && e.target.files[0];
+    if (!f) return;
+    if (!/^image\//.test(f.type)) { note("That file is not an image."); return; }
+    if (f.size > 2 * 1024 * 1024) { note("That image is over 2MB — use a small sprite, not a photo."); return; }
+    const fr = new FileReader();
+    fr.onload = () => setCustom(kind, String(fr.result));
+    fr.onerror = () => note("Could not read that file.");
+    fr.readAsDataURL(f);
+  });
+}
+wireUpload("upStart", "start");
+wireUpload("upGoal", "goal");
+
+document.getElementById("useUrl").addEventListener("click", () => {
+  const url = document.getElementById("spriteUrl").value.trim();
+  if (!url) { note("Paste an image URL first."); return; }
+  setCustom(document.getElementById("spriteUrlKind").value, url);
+});
+document.getElementById("clearSprites").addEventListener("click", () => {
+  CUSTOM.start = null; CUSTOM.goal = null;
+  try { localStorage.removeItem(CUSTOM_KEY); } catch (e) { /* ignore */ }
+  document.getElementById("upStart").value = "";
+  document.getElementById("upGoal").value = "";
+  document.getElementById("spriteUrl").value = "";
+  paintSpritePreview();
+  note("Back to the theme's own sprites.");
+  render();
+});
 
 document.getElementById("torch").addEventListener("change", e => {
   state.torch = e.target.checked;
@@ -1069,6 +1125,105 @@ function spriteCentred(name, size, outline) {
     if (ch !== ".") body += box(x, y, PAL[ch]);
   }
   return body;
+}
+
+/* ---------------- your own sprites ----------------
+   An uploaded or linked image replaces the theme's character or goal. It is
+   drawn as an SVG <image>, and its transparency is traced into a mask grid so
+   Picture mazes take the shape of YOUR sprite too. Nothing leaves the browser.
+   -------------------------------------------------- */
+const CUSTOM = { start: null, goal: null };     // {src, mask|null}
+const CUSTOM_KEY = "mw-sprites-1";
+
+function loadCustom() {
+  try {
+    const raw = localStorage.getItem(CUSTOM_KEY);
+    if (!raw) return;
+    const v = JSON.parse(raw);
+    for (const k of ["start", "goal"]) if (v[k] && v[k].src) CUSTOM[k] = v[k];
+  } catch (e) { /* private window, or stale value */ }
+}
+function saveCustom() {
+  try { localStorage.setItem(CUSTOM_KEY, JSON.stringify(CUSTOM)); }
+  catch (e) { note("Saved for this session only — the browser refused to store it (too large, or private mode)."); }
+}
+function note(msg) {
+  const el = document.getElementById("spriteNote");
+  if (el) el.textContent = msg;
+}
+
+/* trace the alpha channel into the same '#'/'.' grid the Picture shape uses */
+function maskFromImage(img, width) {
+  try {
+    const w = Math.max(6, Math.min(26, width || 20));
+    const h = Math.max(6, Math.min(30, Math.round(w * img.naturalHeight / img.naturalWidth)));
+    const cv = document.createElement("canvas");
+    cv.width = w; cv.height = h;
+    const ctx = cv.getContext("2d", { willReadFrequently: true });
+    ctx.drawImage(img, 0, 0, w, h);
+    const data = ctx.getImageData(0, 0, w, h).data;   // throws if the URL tainted it
+    const rows = [];
+    let on = 0;
+    for (let y = 0; y < h; y++) {
+      let row = "";
+      for (let x = 0; x < w; x++) {
+        const a = data[(y * w + x) * 4 + 3];
+        if (a > 128) { row += "#"; on++; } else row += ".";
+      }
+      rows.push(row);
+    }
+    if (on < 12) return null;                          // nothing solid enough to carve
+    return rows;
+  } catch (e) {
+    return null;                                       // cross-origin image: render only
+  }
+}
+
+function setCustom(kind, src, quiet) {
+  const img = new Image();
+  img.crossOrigin = "anonymous";                       // lets a CORS-friendly URL build a mask
+  img.onload = () => {
+    CUSTOM[kind] = { src: src, mask: maskFromImage(img, 20) };
+    saveCustom();
+    if (!quiet) {
+      note(CUSTOM[kind].mask
+        ? "Sprite loaded. Picture mazes will use its outline."
+        : "Sprite loaded. Its outline could not be read (a linked image from another site blocks that), so Picture mazes keep the theme shape.");
+    }
+    paintSpritePreview();
+    render();
+  };
+  img.onerror = () => note("That image could not be loaded. Check the URL, or upload the file instead.");
+  img.src = src;
+}
+
+function paintSpritePreview() {
+  const host = document.getElementById("spritePreview");
+  if (!host) return;
+  let html = "";
+  for (const k of ["start", "goal"]) {
+    if (CUSTOM[k]) html += '<img src="' + CUSTOM[k].src + '" alt="' + k + ' sprite">';
+  }
+  host.innerHTML = html;
+}
+
+/* the band sprites on the printed sheet */
+function bandSprite(kind, theme, px, outline) {
+  if (CUSTOM[kind]) return '<img src="' + CUSTOM[kind].src + '" height="' + px + '" alt="">';
+  return spriteSVG(kind === "start" ? theme.start : theme.goal, px, outline);
+}
+/* the same thing drawn inside a maze, in maze units, centred on (cx, cy).
+   Keeps spriteCentred's outline, without which the near-white sprites
+   (unicorn, rocket, egg) disappear against the paper. */
+function inlineSprite(kind, theme, cx, cy, size, outline) {
+  const body = CUSTOM[kind]
+    ? '<image href="' + CUSTOM[kind].src + '" x="' + (-size / 2).toFixed(3) +
+      '" y="' + (-size / 2).toFixed(3) + '" width="' + size.toFixed(3) +
+      '" height="' + size.toFixed(3) + '" preserveAspectRatio="xMidYMid meet"/>'
+    : spriteCentred(kind === "start" ? theme.start : theme.goal, size, outline || null);
+  return (cx || cy)
+    ? '<g transform="translate(' + cx.toFixed(3) + "," + cy.toFixed(3) + ')">' + body + "</g>"
+    : body;
 }
 
 /* typical centre-to-centre distance: 1 on square, ~1.73 on hex, varies on circle */
@@ -1211,8 +1366,8 @@ function mountPlay() {
     '<path id="pTrail" fill="none" stroke="#f08a2c" stroke-width="' + (lw * 2.4).toFixed(3) +
     '" stroke-linejoin="round" stroke-linecap="round" opacity=".9"/>' +
     '<g id="pGoal" transform="translate(' + g.cx[goalCell].toFixed(3) + "," + g.cy[goalCell].toFixed(3) + ')">' +
-    spriteCentred(theme.goal, u * 0.78, null) + "</g>" +
-    '<g id="pAvatar">' + spriteCentred(theme.start, u * 0.7, theme.outline || "#444c5c") + "</g>" +
+    inlineSprite("goal", theme, 0, 0, u * 0.78) + "</g>" +
+    '<g id="pAvatar">' + inlineSprite("start", theme, 0, 0, u * 0.7, theme.outline || "#444c5c") + "</g>" +
     "</svg>";
 
   const svg = document.getElementById("playSvg");
@@ -1526,12 +1681,12 @@ function render() {
           '<span class="lvl">' + DIFFS[diffKey].label + " · " + STYLES[styleKey].label + "</span>" +
         "</div>" +
         '<div class="band top" style="height:' + spriteH + 'px">' +
-          '<div class="sprite" style="left:' + pct(g.entry.x) + '%">' + spriteSVG(theme.start, spriteH, theme.outline) + "</div>" +
+          '<div class="sprite" style="left:' + pct(g.entry.x) + '%">' + bandSprite("start", theme, spriteH, theme.outline) + "</div>" +
         "</div>" +
         '<div class="mazewrap" style="height:' + boxH.toFixed(2) + 'mm">' + svg + "</div>" +
         (g.exit
           ? '<div class="band bottom" style="height:' + goalH + 'px">' +
-            '<div class="sprite" style="left:' + pct(g.exit.x) + '%">' + spriteSVG(theme.goal, goalH, null) + "</div></div>"
+            '<div class="sprite" style="left:' + pct(g.exit.x) + '%">' + bandSprite("goal", theme, goalH, null) + "</div></div>"
           : "") +
       "</div>"
     );
@@ -1597,6 +1752,9 @@ function render() {
     "@page { size: " + (state.paper === "a4" ? "A4" : "letter") + " portrait; margin: 12mm; }" +
     "@media print { .sheet { width: " + (paper.w - 24) + "mm !important; } }";
 }
+
+loadCustom();
+paintSpritePreview();
 
 // a challenge link opens straight into that exact maze
 applyHash();

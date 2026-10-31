@@ -34,6 +34,27 @@ open `index.html` locally if you prefer.
 - **Seeded** — the same seed always produces the same sheet.
 - Optional solution overlay, and a difficulty read-out that is not printed.
 
+## Your own sprites
+
+Upload an image for the character or the goal, or paste an image URL, and it
+replaces that theme's sprite everywhere — the printed sheet, the goal marker
+and the avatar you steer in Play mode.
+
+If the image has transparency, its outline is traced into a mask, so **Picture
+mazes take the shape of your sprite** rather than the theme's character.
+
+- PNG with transparency works best; a small sprite, not a photo (2MB limit).
+- Your images are held in this browser's local storage and nothing is uploaded
+  anywhere. They are not part of the repo and are never committed.
+- A linked image from another site renders fine, but browsers block reading its
+  pixels, so its outline can't be traced — Picture mazes keep the theme shape
+  and the page says so. Upload the file instead if you want the outline.
+- **Clear** returns to the theme's own art.
+
+This is the way to use sprites you don't hold the rights to — a favourite game
+character, say. Keep them on your own machine; the sprites in this repo are all
+original art so the project can stay MIT-licensed.
+
 ## Playing
 
 Switch the **Mode** control to **Play**, or just click any maze on the sheet.
