@@ -728,6 +728,144 @@ function crossroadsPass(g, open, rnd, opts) {
   }
 }
 
+/* ---------------- the Lattice type ----------------
+   Crossroads makes each wrong turn expensive by repairing a normal maze.
+   Lattice builds the property in from the start: scatter junction cells across
+   the grid and join them with deliberately winding corridors, so between any
+   two decisions there is a long walk with no choice in it at all. You commit at
+   a junction and then find out, twenty cells later, whether you were right.
+   Shape-agnostic: it only reads g.nb, g.start, g.goal and g.blocked.
+   --------------------------------------------------- */
+
+/* graph distance to b over cells not yet claimed; the two endpoints are
+   themselves claimed, so they must stay walkable or no route can start */
+function freeDist(g, used, b, a) {
+  const d = new Map([[b, 0]]); const q = [b]; let h = 0;
+  while (h < q.length) {
+    const c = q[h++];
+    for (const j of g.nb[c])
+      if (!d.has(j) && (!used.has(j) || j === b || j === a)) { d.set(j, d.get(c) + 1); q.push(j); }
+  }
+  return d;
+}
+
+/* a self-avoiding walk from a to b that prefers the step AWAY from b.
+   Depth-first, so it still always arrives; the bias is what makes it long. */
+function wanderPath(g, used, a, b, rnd, wander, cap) {
+  const d = freeDist(g, used, b, a);
+  if (!d.has(a)) return null;
+  const stack = [a], visited = new Set([a]);
+  for (let guard = 0; stack.length && guard < 40000; guard++) {
+    const cur = stack[stack.length - 1];
+    if (cur === b) return stack.slice();
+    if (stack.length > cap) { visited.add(cur); stack.pop(); continue; }
+    const cands = g.nb[cur].filter(j => !visited.has(j) && d.has(j) && (!used.has(j) || j === b));
+    if (!cands.length) { stack.pop(); continue; }
+    cands.sort((x, y) => d.get(y) - d.get(x));                 // furthest from b first
+    const pick = rnd() < wander ? cands[0] : cands[cands.length - 1];
+    visited.add(pick); stack.push(pick);
+  }
+  return null;
+}
+
+/* scenic, then less scenic, then just get there: the skeleton must land */
+function corridorTo(g, used, a, b, rnd, wander, cap) {
+  return wanderPath(g, used, a, b, rnd, wander, cap)
+      || wanderPath(g, used, a, b, rnd, wander * 0.5, cap)
+      || wanderPath(g, used, a, b, rnd, 0, g.n);
+}
+
+function latticeMaze(g, rnd, opts) {
+  const spacing = Math.max(3, Math.min(9, Math.round(Math.sqrt(g.n) / 4.5)));
+  const cap = Math.round(spacing * (opts.cap || 5));
+  const open = new Set();
+  const used = new Set(g.blocked);                 // a masked-out cell is not ground
+  const free = i => !used.has(i) && !g.blocked.has(i);
+  const nodes = [g.start, g.goal];
+  used.add(g.start); used.add(g.goal);
+
+  const bfsFrom = set => {
+    const d = new Map(); const q = [];
+    for (const c of set) { d.set(c, 0); q.push(c); }
+    let h = 0;
+    while (h < q.length) {
+      const c = q[h++];
+      for (const j of g.nb[c]) if (!d.has(j) && !g.blocked.has(j)) { d.set(j, d.get(c) + 1); q.push(j); }
+    }
+    return d;
+  };
+
+  /* grow: take the ground farthest from everything placed so far, make it a
+     junction, and wire it back with one long corridor. A seed that cannot be
+     wired is banned, or it would be re-picked every round and stall the loop. */
+  const banned = new Set();
+  for (let guard = 0; guard < 4000; guard++) {
+    const d = bfsFrom(used);
+    let best = -1, bd = -1;
+    for (let i = 0; i < g.n; i++)
+      if (free(i) && !banned.has(i)) { const v = d.has(i) ? d.get(i) : -1; if (v > bd) { bd = v; best = i; } }
+    if (best < 0 || bd < 2) break;
+    used.add(best);
+    const dn = bfsFrom([best]);
+    let tgt = -1, td = Infinity;
+    for (const nd of nodes) { const v = dn.get(nd); if (v !== undefined && v < td) { td = v; tgt = nd; } }
+    if (tgt < 0) { used.delete(best); banned.add(best); continue; }
+    const p = corridorTo(g, used, best, tgt, rnd, opts.wander, cap);
+    if (!p) { used.delete(best); banned.add(best); continue; }
+    for (let k = 0; k + 1 < p.length; k++) open.add(ek(g.n, p[k], p[k + 1]));
+    for (const c of p) used.add(c);
+    nodes.push(best);
+  }
+
+  /* extra arms between nearby junctions: these are the loops and the four-way
+     crossings, and they only land while there is still free ground to cross */
+  for (let t = 0; t < nodes.length * (opts.extra || 2); t++) {
+    const thin = nodes.filter(c => deg(g, open, c) < 4);
+    if (!thin.length) break;
+    const a = thin[Math.floor(rnd() * thin.length)];
+    const d = bfsFrom([a]);
+    const near = nodes.filter(b => b !== a && deg(g, open, b) < 4 &&
+                                   d.get(b) !== undefined && d.get(b) <= spacing * 1.8);
+    if (!near.length) continue;
+    near.sort((x, y) => deg(g, open, x) - deg(g, open, y));
+    const b = near[Math.floor(rnd() * Math.min(3, near.length))];
+    const p = corridorTo(g, used, a, b, rnd, opts.wander, cap);
+    if (!p) continue;
+    for (let k = 0; k + 1 < p.length; k++) open.add(ek(g.n, p[k], p[k + 1]));
+    for (const c of p) used.add(c);
+  }
+
+  /* absorb the leftovers so the sheet has no blank patches */
+  const spare = new Set();
+  for (let i = 0; i < g.n; i++) if (free(i)) spare.add(i);
+  const active = [];
+  for (let i = 0; i < g.n; i++) if (used.has(i) && !g.blocked.has(i) && g.nb[i].some(j => spare.has(j))) active.push(i);
+  for (let i = active.length - 1; i > 0; i--) { const j = Math.floor(rnd() * (i + 1)); [active[i], active[j]] = [active[j], active[i]]; }
+  while (active.length) {
+    const i = active[active.length - 1];
+    const c = g.nb[i].filter(j => spare.has(j));
+    if (!c.length) { active.pop(); continue; }
+    const pick = c[Math.floor(rnd() * c.length)];
+    open.add(ek(g.n, i, pick)); spare.delete(pick); used.add(pick); active.push(pick);
+  }
+
+  /* stitch: a corridor can fence a pocket off, and an unreachable goal is not
+     a maze. Union-find over what is open, then knock through between islands. */
+  const par = new Array(g.n); for (let i = 0; i < g.n; i++) par[i] = i;
+  const find = x => { while (par[x] !== x) { par[x] = par[par[x]]; x = par[x]; } return x; };
+  for (let i = 0; i < g.n; i++)
+    for (const j of g.nb[i]) if (open.has(ek(g.n, i, j))) { const a = find(i), b = find(j); if (a !== b) par[a] = b; }
+  const walls = [];
+  for (let i = 0; i < g.n; i++) {
+    if (g.blocked.has(i)) continue;
+    for (const j of g.nb[i]) if (i < j && !g.blocked.has(j) && !open.has(ek(g.n, i, j))) walls.push([i, j]);
+  }
+  for (let i = walls.length - 1; i > 0; i--) { const j = Math.floor(rnd() * (i + 1)); [walls[i], walls[j]] = [walls[j], walls[i]]; }
+  for (const [i, j] of walls) { const a = find(i), b = find(j); if (a !== b) { par[a] = b; open.add(ek(g.n, i, j)); } }
+
+  return open;
+}
+
 /* How far must you walk down a wrong turn before it proves itself wrong?
    1 means an instantly rejectable stub — the thing Crossroads removes. */
 function costToDiscover(g, open, junction, first, pset) {
@@ -891,7 +1029,10 @@ const STYLES = {
   crossroads: { label: "Crossroads", blurb: "Few junctions, but wide ones, and no cheap dead end. Short stubs are looped back instead of left hanging, so a wrong turn runs a long way before it proves itself wrong \u2014 the hard part is choosing, not walking.",
     apply: s => { s.recent = 1.0; s.braid = 0; s.spiral = 0; s.hbias = 1; s.offset = true;
                   s.crossroads = { minBranch: 8, widen: 0.6, far: 12 }; } },
-  everything: { label: "The lot", blurb: "Loops, a grain across your path, a spiral trap and an entrance away from the corner. Hardest of the five.",
+  lattice: { label: "Lattice", blurb: "Junctions scattered across the sheet, joined by long winding corridors. Between one decision and the next there is nothing to decide \u2014 so you commit at a crossroads and only find out twenty cells later whether you were right. Needs room: at one or two mazes a page the corridors are long, at eight they cannot be.",
+    apply: s => { s.recent = 1.0; s.braid = 0; s.spiral = 0; s.hbias = 1; s.offset = true;
+                  s.lattice = { wander: 0.8, cap: 5, extra: 2 }; } },
+  everything: { label: "The lot", blurb: "Loops, a grain across your path, a spiral trap and an entrance away from the corner. Everything at once.",
     apply: s => { s.spiral = Math.max(5, s.spiral); s.braid = Math.max(0.4, s.braid); s.hbias = Math.max(2, s.hbias); s.offset = true; } }
 };
 
@@ -915,7 +1056,7 @@ function mulberry32(a) {
 function specFor(diffKey, styleKey, shape, boxW, boxH) {
   const d = DIFFS[diffKey];
   const s = { braid: d.braid, recent: d.recent, hbias: d.hbias, spiral: d.spiral,
-              offset: d.offset, cellMM: d.cellMM, crossroads: null };
+              offset: d.offset, cellMM: d.cellMM, crossroads: null, lattice: null };
   STYLES[styleKey].apply(s);
   if (shape !== "square") s.spiral = 0;           // the spiral trap is a square-grid trick
   const c = Math.max(7, Math.min(40, Math.round(boxW / s.cellMM)));
@@ -943,16 +1084,30 @@ function bestMaze(shape, spec, theme, baseSeed) {
   for (let k = 0; k < CANDIDATES; k++) {
     const rnd = mulberry32((baseSeed + k * 0x9E3779B1) >>> 0);
     const g = makeGrid(shape, spec, rnd, theme);
-    const open = carve(g, rnd, spec.recent, g.blocked);
-    if (g.blocked.size) attach(g, open, rnd, 2);
-    if (spec.crossroads) crossroadsPass(g, open, rnd, spec.crossroads);
-    else braid(g, open, rnd, spec.braid);
+    let open;
+    if (spec.lattice) {
+      open = latticeMaze(g, rnd, spec.lattice);
+      // the growth pass leaves stubs where it absorbed leftover ground; loop
+      // them back with the Crossroads repair, widening off (the lattice makes
+      // its own junctions, and widening here would shorten the corridors)
+      crossroadsPass(g, open, rnd, { minBranch: 10, widen: 0 });
+    } else {
+      open = carve(g, rnd, spec.recent, g.blocked);
+      if (g.blocked.size) attach(g, open, rnd, 2);
+      if (spec.crossroads) crossroadsPass(g, open, rnd, spec.crossroads);
+      else braid(g, open, rnd, spec.braid);
+    }
     const m = score(g, open);
     if (!m) continue;
     const span = shape === "circle" ? spec.rings * 2 : (spec.cols + spec.rows);
     const cand = { g: g, open: open, m: m };
+    // Lattice is deliberately fork-poor, so the default forks x decoy score
+    // would pick its most ordinary candidate. Score it on what it is for:
+    // a long route where every wrong turn costs a long walk.
+    const v = spec.lattice ? m.meanCost * m.len : m.value;
+    const bv = best ? (spec.lattice ? best.m.meanCost * best.m.len : best.m.value) : -1;
     if (!longest || m.len > longest.m.len) longest = cand;
-    if (m.len >= 1.25 * span && (!best || m.value > best.m.value)) best = cand;
+    if (m.len >= 1.25 * span && (!best || v > bv)) best = cand;
   }
   return best || longest;
 }

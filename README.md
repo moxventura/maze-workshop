@@ -6,7 +6,7 @@ A single-file, client-side generator for printable maze sheets. Runs entirely
 in the browser — no build step, no server, nothing uploaded. Clone the repo and
 open `index.html` locally if you prefer.
 
-![themes](https://img.shields.io/badge/themes-7-blue) ![styles](https://img.shields.io/badge/maze%20styles-6-green)
+![themes](https://img.shields.io/badge/themes-7-blue) ![styles](https://img.shields.io/badge/maze%20styles-7-green)
 
 ## What it does
 
@@ -27,8 +27,8 @@ open `index.html` locally if you prefer.
   All sprites are original pixel art drawn for this project, so the repo can
   stay MIT-licensed. The monster theme is a monster-catching motif, not any
   particular franchise's characters.
-- **6 maze styles**, multi-select and dealt out across the page one per maze:
-  Classic, Loopy, Against the grain, Spiral trap, Crossroads, The lot.
+- **7 maze styles**, multi-select and dealt out across the page one per maze:
+  Classic, Loopy, Against the grain, Spiral trap, Crossroads, Lattice, The lot.
 - **4 difficulties** plus Ladder, which ramps Easy → Expert down the page.
 - **1–8 mazes per page**, laid out to fit exactly one A4 or US Letter sheet.
 - **Seeded** — the same seed always produces the same sheet.
@@ -115,6 +115,34 @@ textbook depth-first carve, which produces long corridors with few real choices:
   about 1 step to 3, the average cost of a wrong turn roughly doubles, and
   instantly-rejectable turns fall from ~4 per maze to ~2 (to zero on a large
   one). Dead ends drop from ~30 to ~3.
+- **Lattice** — Crossroads gets that property by *repairing* an ordinary maze;
+  Lattice builds it in from the start. Junction cells are scattered across the
+  grid and each is wired back to the network by a deliberately winding
+  corridor, so between one decision and the next there is nothing to decide at
+  all: you commit at a crossroads and find out twenty-odd cells later whether
+  you were right. Leftover ground becomes *more lattice* rather than random
+  stubs, so every cell stays on a corridor, and a union-find stitch pass makes
+  an unreachable goal impossible by construction. Measured over 1024
+  shape x count x difficulty combinations against Crossroads on the same
+  grids, the solution route is 13% longer and the cost of a wrong turn rises on
+  every shape — on a square sheet the cheapest wrong turn goes 2.7 -> 3.6 steps
+  and the mean 14.2 -> 16.3.
+
+  Those averages understate it, because Lattice needs room. At one maze a page
+  (720-1840 cells) the cheapest *quarter* of wrong turns costs 15-16 steps
+  against Crossroads' 7.0-7.5, and the mean 29-36 against 18-21. At eight a
+  page the grid is 72-180 cells, a corridor is three cells, and the two types
+  are much the same — you cannot have a long walk between decisions on a small
+  grid. Print it 1-4 up.
+
+  Two honest limits. Lattice is deliberately fork-poor, so the default
+  candidate score (*forks* x *decoy size*) picked its most ordinary candidate
+  out of the sixteen — on a 1840-cell maze that turned a lower quartile of 16.0
+  into 7.5. It is scored instead on route length x mean cost of a wrong turn.
+  And junction *degree* stays at 3.0-3.1, no better than Crossroads: extra arms
+  and long corridors compete for the same free cells, so on a 4-neighbour grid
+  you can buy expensive choices or many-way choices, not both. Lattice buys the
+  expensive ones.
 
 Each maze is the best of 16 candidates, scored on *forks along the route* ×
 *how far a wrong turn carries you before it is provably wrong*, with candidates
