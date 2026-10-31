@@ -6,7 +6,7 @@ A single-file, client-side generator for printable maze sheets. Runs entirely
 in the browser — no build step, no server, nothing uploaded. Clone the repo and
 open `index.html` locally if you prefer.
 
-![themes](https://img.shields.io/badge/themes-6-blue) ![styles](https://img.shields.io/badge/maze%20styles-5-green)
+![themes](https://img.shields.io/badge/themes-7-blue) ![styles](https://img.shields.io/badge/maze%20styles-5-green)
 
 ## What it does
 
@@ -18,10 +18,15 @@ open `index.html` locally if you prefer.
   - **Picture** cuts the maze to the silhouette of the theme's character, so
     the unicorn maze is unicorn-shaped and the alien maze is a big-headed alien.
     Enter at the top of the shape, leave at the bottom.
-- **6 themes** — Mineshaft, Explorer, Unicorn, Space, Dino, Alien. Each has its
-  own pixel-art character at the entrance, a goal sprite at the exit, and ink
-  colour: the alien crosses the crop circles to reach his flying saucer, the
-  unicorn hunts rainbows, the dinosaur her eggs.
+- **7 themes** — Mineshaft, Explorer, Unicorn, Space, Dino, Alien, Monsters.
+  Each has its own pixel-art character at the entrance, a goal sprite at the
+  exit, and ink colour: the alien crosses the crop circles to reach his flying
+  saucer, the unicorn hunts rainbows, the little monster finds its way back to
+  its ball.
+
+  All sprites are original pixel art drawn for this project, so the repo can
+  stay MIT-licensed. The monster theme is a monster-catching motif, not any
+  particular franchise's characters.
 - **5 maze styles**, multi-select and dealt out across the page one per maze:
   Classic, Loopy, Against the grain, Spiral trap, The lot.
 - **4 difficulties** plus Ladder, which ramps Easy → Expert down the page.
