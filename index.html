@@ -174,6 +174,31 @@
   .sprite img, svg image { image-rendering: pixelated; }
   .card.playable { cursor: pointer; }
 
+  /* ---- touch controls ---- */
+  .dpad { display: grid; gap: 7px; justify-content: center; margin-top: 4px; }
+  .dpad.sq { grid-template-areas: ". u ." "l d r"; }
+  .dpad.hx { grid-template-areas: "nw ne" "w e" "sw se"; }
+  .dpad.ci { grid-template-areas: "in out" "ccw cw"; }
+  .dpad button {
+    min-width: 56px; min-height: 48px; font-size: 1rem; padding: 6px 10px;
+    touch-action: manipulation; user-select: none;
+  }
+  .dpad button:active { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .dpad .u { grid-area: u; } .dpad .d { grid-area: d; }
+  .dpad .l { grid-area: l; } .dpad .r { grid-area: r; }
+  .dpad .nw { grid-area: nw; } .dpad .ne { grid-area: ne; }
+  .dpad .w  { grid-area: w;  } .dpad .e  { grid-area: e;  }
+  .dpad .sw { grid-area: sw; } .dpad .se { grid-area: se; }
+  .dpad .in { grid-area: in; } .dpad .out { grid-area: out; }
+  .dpad .ccw { grid-area: ccw; } .dpad .cw { grid-area: cw; }
+
+  @media (max-width: 880px) {
+    /* the maze must come first, or you scroll past the whole rail to reach it */
+    .layout.playing > div { order: -1; }
+    svg.play { max-height: 56vh; }
+    .playbar { font-size: .9rem; }
+  }
+
   @media print {
     body { background: #fff; }
     .wrap { padding: 0; max-width: none; }
@@ -318,6 +343,7 @@
           <span class="won" id="wonMsg"></span>
         </div>
         <div class="stage" id="stage"></div>
+        <div id="pad"></div>
         <p class="keyhint" id="keyhint"></p>
         <p class="sr" id="live" aria-live="polite"></p>
       </div>
@@ -1459,6 +1485,17 @@ function mountPlay() {
     '<g id="pAvatar">' + inlineSprite("start", theme, 0, 0, u * 0.7, theme.outline || "#444c5c") + "</g>" +
     "</svg>";
 
+  const pad = document.getElementById("pad");
+  if (pad) {
+    pad.innerHTML = dpadHTML(state.shape);
+    pad.addEventListener("click", e => {
+      const btn = e.target.closest("button[data-act]");
+      if (!btn) return;
+      e.preventDefault();
+      moveBy(btn.getAttribute("data-act"));
+    });
+  }
+
   const svg = document.getElementById("playSvg");
   svg.addEventListener("keydown", onKey);
   svg.addEventListener("pointerdown", onPointerDown);
@@ -1468,11 +1505,12 @@ function mountPlay() {
   svg.focus({ preventScroll: true });
 
   const hints = {
-    hex: "Hex has six ways out of every cell: <kbd>Q</kbd><kbd>E</kbd> and <kbd>Z</kbd><kbd>C</kbd> for the diagonals, <kbd>A</kbd><kbd>D</kbd> left and right. Arrows work too — or just drag.",
-    circle: "Arrows follow the screen. <kbd>Q</kbd> goes inward and <kbd>E</kbd> outward, <kbd>Z</kbd> and <kbd>C</kbd> run round the ring. Or just drag."
+    hex: "Six ways out of every cell: <kbd>Q</kbd><kbd>E</kbd> and <kbd>Z</kbd><kbd>C</kbd> for the diagonals, <kbd>A</kbd><kbd>D</kbd> left and right.",
+    circle: "Arrows follow the screen. <kbd>Q</kbd> goes inward, <kbd>E</kbd> outward, <kbd>Z</kbd> and <kbd>C</kbd> run round the ring."
   };
-  document.getElementById("keyhint").innerHTML = hints[state.shape] ||
-    "Arrow keys or <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd>, or drag with the mouse or a finger. Retrace your line to rub it out.";
+  document.getElementById("keyhint").innerHTML =
+    (hints[state.shape] || "Arrow keys or <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd>, or drag the character with the mouse.") +
+    " On a touch screen, swipe anywhere on the maze or use the buttons. Corridors are walked for you — you only choose at junctions. Go back on yourself to rub the line out.";
 }
 
 function trailPoints() {
@@ -1513,6 +1551,25 @@ function punchFog(cell) {
   c.setAttribute("r", (ps.unit * 1.25).toFixed(2));
   c.setAttribute("fill", "white");
   holes.appendChild(c);
+}
+
+/* A corridor offers no choice, so walking it cell by cell is busywork —
+   especially on a phone. After a discrete input (key, d-pad, swipe) run on to
+   the next real decision; and when backing out, rewind to the last junction. */
+function runCorridor() {
+  for (let guard = 0; guard < 80 && !ps.won; guard++) {
+    const prev = ps.stack.length > 1 ? ps.stack[ps.stack.length - 2] : -1;
+    const fwd = nbrs(ps.g, ps.open, ps.cur).filter(x => x !== prev);
+    if (fwd.length !== 1) break;                      // junction, or dead end
+    if (!stepTo(fwd[0])) break;
+  }
+}
+function rewindCorridor() {
+  for (let guard = 0; guard < 80 && !ps.won; guard++) {
+    if (ps.stack.length < 2) break;
+    if (deg(ps.g, ps.open, ps.cur) !== 2) break;      // stop at a junction
+    if (!stepTo(ps.stack[ps.stack.length - 2])) break;
+  }
 }
 
 function stepTo(j) {
@@ -1575,6 +1632,18 @@ function win() {
 }
 
 /* ---- keyboard ---- */
+/* every discrete input funnels through here, so auto-run behaves the same
+   whether it came from a key, the d-pad or a swipe */
+function discreteStep(j) {
+  if (j === -2) { flashHint(); return false; }
+  if (j < 0) return false;
+  const prev = ps.stack.length > 1 ? ps.stack[ps.stack.length - 2] : -1;
+  const undoing = j === prev;
+  if (!stepTo(j)) return false;
+  if (undoing) rewindCorridor(); else runCorridor();
+  return true;
+}
+
 function onKey(e) {
   if (!ps || ps.won) return;
   const t = e.target;
@@ -1582,16 +1651,48 @@ function onKey(e) {
   const prev = ps.stack.length > 1 ? ps.stack[ps.stack.length - 2] : -1;
   if (state.shape === "circle" && POLAR_KEYS[e.code]) {
     e.preventDefault();
-    stepTo(pickPolar(ps.g, ps.open, ps.cur, POLAR_KEYS[e.code], prev, ps.heading));
+    discreteStep(pickPolar(ps.g, ps.open, ps.cur, POLAR_KEYS[e.code], prev, ps.heading));
     return;
   }
   let v = DIR_KEYS[e.code];
   if (!v && state.shape === "hex") v = HEX_KEYS[e.code];
   if (!v) return;
   e.preventDefault();
-  const j = pickByDirection(ps.g, ps.open, ps.cur, prev, ps.heading, v[0], v[1]);
-  if (j === -2) flashHint();
-  else stepTo(j);
+  discreteStep(pickByDirection(ps.g, ps.open, ps.cur, prev, ps.heading, v[0], v[1]));
+}
+
+/* one entry point for the d-pad and for swipes */
+function moveBy(act) {
+  if (!ps || ps.won) return;
+  const prev = ps.stack.length > 1 ? ps.stack[ps.stack.length - 2] : -1;
+  if (POLAR_ACTS[act]) {
+    discreteStep(pickPolar(ps.g, ps.open, ps.cur, POLAR_ACTS[act], prev, ps.heading));
+    return;
+  }
+  const v = ACT_DIRS[act];
+  if (!v) return;
+  discreteStep(pickByDirection(ps.g, ps.open, ps.cur, prev, ps.heading, v[0], v[1]));
+}
+const ACT_DIRS = {
+  u: [0, -1], d: [0, 1], l: [-1, 0], r: [1, 0],
+  nw: [-0.5, -R3], ne: [0.5, -R3], w: [-1, 0], e: [1, 0], sw: [-0.5, R3], se: [0.5, R3]
+};
+const POLAR_ACTS = { in: "in", out: "out", ccw: "ccw", cw: "cw" };
+
+/* the on-screen pad: shape-aware, because a hex has six ways out and a
+   circle's useful directions are in, out and round */
+function dpadHTML(shape) {
+  const b = (cls, label, title) =>
+    '<button type="button" class="' + cls + '" data-act="' + cls + '" title="' + title + '">' + label + "</button>";
+  if (shape === "hex")
+    return '<div class="dpad hx">' + b("nw","\u2196","Up and left") + b("ne","\u2197","Up and right") +
+      b("w","\u2190","Left") + b("e","\u2192","Right") +
+      b("sw","\u2199","Down and left") + b("se","\u2198","Down and right") + "</div>";
+  if (shape === "circle")
+    return '<div class="dpad ci">' + b("in","\u2193 In","Towards the middle") + b("out","\u2191 Out","Away from the middle") +
+      b("ccw","\u21ba","Round one way") + b("cw","\u21bb","Round the other way") + "</div>";
+  return '<div class="dpad sq">' + b("u","\u2191","Up") + b("l","\u2190","Left") +
+    b("d","\u2193","Down") + b("r","\u2192","Right") + "</div>";
 }
 
 function flashHint() {
@@ -1602,7 +1703,8 @@ function flashHint() {
 }
 
 /* ---- drag ---- */
-let dragging = false, lastPt = null;
+let dragging = false, lastPt = null, swipeFrom = null, swiping = false;
+const SWIPE_PX = 26;          // movement that counts as one step
 function svgPoint(e) {
   const svg = document.getElementById("playSvg");
   const ctm = svg.getScreenCTM();
@@ -1629,16 +1731,33 @@ function nearestStep(pt) {
 }
 function onPointerDown(e) {
   if (!ps || ps.won) return;
+  document.getElementById("playSvg").focus({ preventScroll: true });
+  try { e.target.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
+  // A fingertip is wider than a cell and sits on top of the character, so
+  // touch steers by swiping anywhere on the maze instead of tracing the line.
+  if (e.pointerType === "touch") {
+    swiping = true; swipeFrom = [e.clientX, e.clientY];
+    e.preventDefault();
+    return;
+  }
   const pt = svgPoint(e);
   if (!pt) return;
   const near = Math.hypot(ps.g.cx[ps.cur] - pt[0], ps.g.cy[ps.cur] - pt[1]);
-  if (near > ps.unit * 1.6) return;                   // start the drag on the avatar
+  if (near > ps.unit * 1.6) return;                   // mouse drag starts on the avatar
   dragging = true; lastPt = pt;
-  try { e.target.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
   e.preventDefault();
-  document.getElementById("playSvg").focus({ preventScroll: true });
 }
 function onPointerMove(e) {
+  if (swiping && ps && !ps.won) {
+    e.preventDefault();
+    const dx = e.clientX - swipeFrom[0], dy = e.clientY - swipeFrom[1];
+    if (Math.hypot(dx, dy) < SWIPE_PX) return;
+    // keep stepping as the finger keeps travelling: swipe and hold to run
+    const horiz = Math.abs(dx) > Math.abs(dy);
+    moveBy(horiz ? (dx > 0 ? "r" : "l") : (dy > 0 ? "d" : "u"));
+    swipeFrom = [e.clientX, e.clientY];
+    return;
+  }
   if (!dragging || !ps || ps.won) return;
   const pt = svgPoint(e);
   if (!pt) return;
@@ -1654,7 +1773,7 @@ function onPointerMove(e) {
   lastPt = pt;
 }
 function endDrag(e) {
-  dragging = false;
+  dragging = false; swiping = false; swipeFrom = null;
   try { if (e && e.target.releasePointerCapture) e.target.releasePointerCapture(e.pointerId); } catch (err) { /* ignore */ }
 }
 
@@ -1816,6 +1935,7 @@ function render() {
   // ---- mode: the sheet is parked, never display:none, so fitToPage can measure
   const playing = state.mode === "play";
   document.getElementById("modeBlurb").textContent = MODES[state.mode].blurb;
+  document.querySelector(".layout").classList.toggle("playing", playing);
   document.getElementById("sheetScroll").classList.toggle("parked", playing);
   document.getElementById("play").hidden = !playing;
   document.getElementById("playBox").hidden = !playing;

@@ -59,8 +59,15 @@ original art so the project can stay MIT-licensed.
 
 Switch the **Mode** control to **Play**, or just click any maze on the sheet.
 
-- **Drag** a line with the mouse or a finger, **or** steer with the arrow keys
-  or `WASD`. Retrace your line to rub it out, exactly like a pencil.
+- **Mouse:** drag the character to trace a line, or steer with the arrow keys
+  or `WASD`. Go back on yourself to rub the line out, exactly like a pencil.
+- **Touch:** swipe anywhere on the maze, or use the on-screen pad. Tracing with
+  a finger does not work — a fingertip is wider than a cell and covers the
+  character — so touch steers rather than draws.
+- **Corridors are walked for you.** One input carries you to the next real
+  decision, so you only ever choose at a junction (about 16 cells per press on
+  an open maze). It can never skip a choice: it only runs on while there is
+  exactly one way forward. Going back rewinds to the last junction.
 - Hex mazes have six ways out of every cell and no straight up or down, so they
   also get six exact keys: `Q`/`E` and `Z`/`C` for the diagonals, `A`/`D` for
   left and right. The arrows still work — they take the only open way when
