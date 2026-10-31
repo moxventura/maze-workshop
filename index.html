@@ -134,13 +134,43 @@
   .stat b { color: var(--fg); font-family: var(--font-display); display: block; font-size: .92rem; margin-bottom: 2px; }
   .stat .nums { font-variant-numeric: tabular-nums; }
 
+  /* ---- play mode ---- */
+  /* The sheet is parked, never display:none — fitToPage measures it, and a
+     hidden sheet measures zero and silently stops fitting to one page. */
+  .parked { visibility: hidden; position: absolute; height: 0; overflow: hidden; }
+
+  #play { display: flex; flex-direction: column; gap: 12px; }
+  .playbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; }
+  .playbar .readout { font-family: var(--font-display); font-weight: 600; font-variant-numeric: tabular-nums; }
+  .playbar .readout span { color: var(--muted); font-weight: 400; }
+  .stage {
+    background: var(--paper); border: 1px solid var(--line); border-radius: 12px;
+    box-shadow: var(--shadow); padding: 10px; display: flex; justify-content: center;
+  }
+  svg.play {
+    width: 100%; max-height: 74vh; height: auto; display: block;
+    touch-action: none; border-radius: 6px; outline: none;
+  }
+  svg.play:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+  .won { font-family: var(--font-display); font-weight: 700; color: var(--accent-ink); }
+  .keyhint { font-size: .8rem; color: var(--muted); }
+  .keyhint kbd {
+    font-family: ui-monospace, Menlo, Consolas, monospace; font-size: .76rem;
+    background: var(--surface-2); border: 1px solid var(--line); border-bottom-width: 2px;
+    border-radius: 5px; padding: 1px 5px;
+  }
+  .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  .card.playable { cursor: pointer; }
+
   @media print {
     body { background: #fff; }
     .wrap { padding: 0; max-width: none; }
-    header.top, .rail, .stats, .no-print { display: none !important; }
+    header.top, .rail, .stats, .no-print, #play { display: none !important; }
     .layout { display: block; }
     .sheet { box-shadow: none; margin: 0; padding: 0; min-height: 0 !important; }
+    /* undo the on-screen parking, or the printed page comes out blank */
     .sheet-scroll { overflow: visible; }
+    .sheet-scroll.parked { visibility: visible !important; position: static !important; height: auto !important; overflow: visible !important; }
   }
   @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
 </style>
@@ -162,6 +192,27 @@
 
   <div class="layout">
     <form class="rail no-print" id="controls" autocomplete="off">
+      <fieldset>
+        <legend>Mode</legend>
+        <div class="chips" id="modeChips"></div>
+        <p class="hint" id="modeBlurb"></p>
+      </fieldset>
+
+      <fieldset id="playBox" hidden>
+        <legend>Playing</legend>
+        <div class="chips" id="playPick"></div>
+        <label class="check"><input type="checkbox" id="torch"> Torchlight</label>
+        <div class="row">
+          <button type="button" id="hintBtn">Stuck?</button>
+          <button type="button" id="giveUp">Show the way</button>
+        </div>
+        <div class="row">
+          <button type="button" id="restart">Restart</button>
+          <button type="button" id="linkBtn" class="primary">Copy link</button>
+        </div>
+        <p class="hint" id="linkNote"></p>
+      </fieldset>
+
       <fieldset>
         <legend>Theme</legend>
         <div class="chips" id="themeChips"></div>
@@ -210,8 +261,8 @@
         <label class="check"><input type="checkbox" id="solution"> Show solution</label>
         <button type="button" id="printBtn" class="primary block">Print A4</button>
         <div id="printFallback" hidden>
-          This viewer blocks both the print dialog and pop-up windows. Open the artifact in its own
-          browser tab and press <kbd>Ctrl</kbd>+<kbd>P</kbd> (<kbd>⌘</kbd>+<kbd>P</kbd> on Mac). The sheet is set to A4 and fits one page.
+          Your browser blocked the print dialog. Press <kbd>Ctrl</kbd>+<kbd>P</kbd>
+          (<kbd>⌘</kbd>+<kbd>P</kbd> on Mac) instead. The sheet is set to A4 and fits one page.
         </div>
       </fieldset>
 
@@ -219,8 +270,19 @@
     </form>
 
     <div>
-      <div class="sheet-scroll">
+      <div class="sheet-scroll" id="sheetScroll">
         <div class="sheet" id="sheet"></div>
+      </div>
+      <div id="play" class="no-print" hidden>
+        <div class="playbar">
+          <span class="readout" id="clock">0.0s</span>
+          <span class="readout" id="moves">0 <span>moves</span></span>
+          <span class="readout" id="best"></span>
+          <span class="won" id="wonMsg"></span>
+        </div>
+        <div class="stage" id="stage"></div>
+        <p class="keyhint" id="keyhint"></p>
+        <p class="sr" id="live" aria-live="polite"></p>
       </div>
       <div class="stats no-print" id="stats"></div>
     </div>
@@ -767,6 +829,21 @@ function arrowPath(e, lw, col) {
     '" stroke-linecap="round" stroke-linejoin="round"/>';
 }
 
+/* Wall geometry only — shared by the printed sheet and the playable maze.
+   (mazeSVG also draws the circle hub sprite, which play draws itself.) */
+function wallsPath(g, open) {
+  let walls = "";
+  for (const [k, d] of g.seg) if (!open.has(k)) walls += d;
+  return walls + g.borderPath;
+}
+function strokeFor(g) {
+  return Math.max(0.07, Math.min(0.17, 2.4 / Math.max(g.viewBox[2], g.viewBox[3])));
+}
+function paddedBox(g) {
+  const vb = g.viewBox, pad = Math.max(vb[2], vb[3]) * 0.035 + strokeFor(g);
+  return [vb[0] - pad, vb[1] - pad, vb[2] + pad * 2, vb[3] + pad * 2].map(v => +v.toFixed(2));
+}
+
 function mazeSVG(g, open, m, theme, showSolution) {
   const vb = g.viewBox;
   const span = Math.max(vb[2], vb[3]);
@@ -794,7 +871,13 @@ function mazeSVG(g, open, m, theme, showSolution) {
 /* ---------------- state ---------------- */
 const state = {
   theme: "unicorn", shape: "square", styles: ["everything"], diff: "ladder",
-  count: 4, seed: "meadow-7", paper: "a4", solution: false
+  count: 4, seed: "meadow-7", paper: "a4", solution: false,
+  mode: "print", playIndex: 0, torch: false
+};
+
+const MODES = {
+  print: { label: "Print sheet", blurb: "Lay out a page of mazes to print. Click any maze to play it instead." },
+  play: { label: "Play", blurb: "Play in the browser: drag a line or use the keys. Retrace your line to rub it out." }
 };
 
 /* ---------------- controls ---------------- */
@@ -818,6 +901,10 @@ function checkChips(host, items, name, has, toggle) {
     host.appendChild(lab);
   }
 }
+
+radioChips(document.getElementById("modeChips"),
+  Object.keys(MODES).map(k => ({ value: k, label: MODES[k].label })),
+  "mode", () => state.mode, v => state.mode = v);
 
 radioChips(document.getElementById("themeChips"),
   Object.keys(THEMES).map(k => ({ value: k, label: THEMES[k].label })),
@@ -859,9 +946,42 @@ const paperSel = document.getElementById("paper");
 paperSel.addEventListener("change", e => { state.paper = e.target.value; render(); });
 document.getElementById("solution").addEventListener("change", e => { state.solution = e.target.checked; render(); });
 
+document.getElementById("torch").addEventListener("change", e => {
+  state.torch = e.target.checked;
+  if (ps) startPlay(state.playIndex);
+});
+document.getElementById("hintBtn").addEventListener("click", showHint);
+document.getElementById("giveUp").addEventListener("click", showAnswer);
+document.getElementById("restart").addEventListener("click", () => startPlay(state.playIndex));
+document.getElementById("linkBtn").addEventListener("click", () => {
+  const url = linkFor(state.playIndex);
+  hashGuard = true;                                   // replaceState doesn't fire hashchange
+  history.replaceState(null, "", url);
+  const note = document.getElementById("linkNote");
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(url).then(
+      () => { note.textContent = "Link copied — whoever opens it gets this exact maze."; },
+      () => { note.textContent = "Couldn't copy. The link is in the address bar — copy it from there."; }
+    );
+  } else {
+    note.textContent = "The link is in the address bar — copy it from there.";
+  }
+  setTimeout(() => { hashGuard = false; }, 50);
+});
+window.addEventListener("hashchange", () => { if (!hashGuard && applyHash()) render(); });
+
+// Ctrl+P while playing must still print the sheet, correctly fitted
+window.addEventListener("beforeprint", () => { if (lastFit) lastFit(); });
+
 document.getElementById("printBtn").addEventListener("click", () => {
   const fb = document.getElementById("printFallback");
   fb.hidden = true;
+  if (state.mode !== "print") {                       // print the sheet, not the game
+    state.mode = "print";
+    const chip = document.querySelector('input[name=mode][value=print]');
+    if (chip) chip.checked = true;
+    render();
+  }
   if (state.paper !== "a4") { state.paper = "a4"; paperSel.value = "a4"; render(); }
   let fired = false;
   const mark = () => { fired = true; };
@@ -907,6 +1027,444 @@ function fitToPage(grows, paperHmm) {
   pass();
 }
 
+/* ============================================================
+   Play mode. Movement is "walk the graph": nbrs() is the whole
+   rule, so every shape is playable with no per-shape move code.
+   Only key-to-direction mapping is shape-aware.
+   ============================================================ */
+
+const built = [];          // {g, open, m, diffKey, styleKey} per maze on the sheet
+let ps = null;             // live player state
+let clockTimer = null;
+let maskSeq = 0;
+let lastFit = null;        // re-run the one-page fit before printing
+
+/* sprite centred on (0,0) so a <g transform="translate(x,y)"> can move it */
+function spriteCentred(name, size, outline) {
+  const art = ART[name], w = art[0].length, h = art.length;
+  const s = size / Math.max(w, h);
+  const x0 = -w * s / 2, y0 = -h * s / 2;
+  const box = (x, y, fill) =>
+    '<rect x="' + (x0 + x * s).toFixed(3) + '" y="' + (y0 + y * s).toFixed(3) +
+    '" width="' + (s * 1.06).toFixed(3) + '" height="' + (s * 1.06).toFixed(3) + '" fill="' + fill + '"/>';
+  const filled = new Set();
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (art[y][x] !== ".") filled.add(x + "," + y);
+  let body = "";
+  if (outline) {                                   // pale sprites vanish on white
+    const edge = new Set();
+    for (const id of filled) {
+      const [x, y] = id.split(",").map(Number);
+      for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) {
+        const n = (x + dx) + "," + (y + dy);
+        if (!filled.has(n)) edge.add(n);
+      }
+    }
+    for (const id of edge) { const [x, y] = id.split(",").map(Number); body += box(x, y, outline); }
+  }
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const ch = art[y][x];
+    if (ch !== ".") body += box(x, y, PAL[ch]);
+  }
+  return body;
+}
+
+/* typical centre-to-centre distance: 1 on square, ~1.73 on hex, varies on circle */
+function cellUnit(g) {
+  let sum = 0, n = 0;
+  for (let i = 0; i < g.n && n < 40; i++) {
+    for (const j of g.nb[i]) { sum += Math.hypot(g.cx[j] - g.cx[i], g.cy[j] - g.cy[i]); n++; }
+  }
+  return n ? sum / n : 1;
+}
+
+/* Pick a neighbour from a screen-space direction, with the tie-break ladder.
+   Returns a cell index, -1 (nothing that way) or -2 (genuinely ambiguous). */
+function pickByDirection(g, open, cur, prev, heading, vx, vy) {
+  const opts = nbrs(g, open, cur);
+  const scored = [];
+  for (const j of opts) {
+    const dx = g.cx[j] - g.cx[cur], dy = g.cy[j] - g.cy[cur];
+    const L = Math.hypot(dx, dy) || 1;
+    const dot = (dx / L) * vx + (dy / L) * vy;
+    if (dot > 0.34) scored.push({ j: j, dot: dot, ux: dx / L, uy: dy / L });
+  }
+  if (!scored.length) return -1;
+  let top = -2;
+  for (const o of scored) if (o.dot > top) top = o.dot;
+  const tied = scored.filter(o => top - o.dot < 0.06);
+  if (tied.length === 1) return tied[0].j;            // only one open that way
+  const notPrev = tied.filter(o => o.j !== prev);     // don't "advance" backwards
+  if (notPrev.length === 1) return notPrev[0].j;
+  const pool = notPrev.length ? notPrev : tied;
+  if (heading) {                                      // carry on the way you were going
+    let bj = -1, bd = -2;
+    for (const o of pool) {
+      const d = o.ux * heading[0] + o.uy * heading[1];
+      if (d > bd) { bd = d; bj = o.j; }
+    }
+    if (bd > 0.5) return bj;
+  }
+  return -2;
+}
+
+/* pointy-top hex: the diagonal neighbours sit at ±60° and ±120° from
+   horizontal, i.e. (±0.5, ±√3/2) — the tall component is the vertical one. */
+const R3 = Math.sqrt(3) / 2;
+const DIR_KEYS = {
+  ArrowUp: [0, -1], KeyW: [0, -1], Numpad8: [0, -1],
+  ArrowDown: [0, 1], KeyS: [0, 1], Numpad2: [0, 1],
+  ArrowLeft: [-1, 0], KeyA: [-1, 0], Numpad4: [-1, 0],
+  ArrowRight: [1, 0], KeyD: [1, 0], Numpad6: [1, 0]
+};
+/* hex has no straight up or down, so give it its six exact directions.
+   Bound on KeyboardEvent.code, so the physical hex survives AZERTY/QWERTZ. */
+const HEX_KEYS = {
+  KeyQ: [-0.5, -R3], Numpad7: [-0.5, -R3],
+  KeyE: [0.5, -R3], Numpad9: [0.5, -R3],
+  KeyZ: [-0.5, R3], Numpad1: [-0.5, R3],
+  KeyC: [0.5, R3], Numpad3: [0.5, R3]
+};
+
+/* A circle maze has moves the four arrows cannot name: at the diagonals a
+   radial step and a step round the ring score identically. So give it explicit
+   polar keys — in/out and the two ways round — alongside the arrows. */
+const POLAR_KEYS = {
+  KeyQ: "in", Numpad7: "in", KeyE: "out", Numpad9: "out",
+  KeyZ: "ccw", Numpad1: "ccw", KeyC: "cw", Numpad3: "cw"
+};
+function pickPolar(g, open, cur, mode, prev, heading) {
+  const cx = g.viewBox[0] + g.viewBox[2] / 2, cy = g.viewBox[1] + g.viewBox[3] / 2;
+  const rc = Math.hypot(g.cx[cur] - cx, g.cy[cur] - cy);
+  const ax = g.cx[cur] - cx, ay = g.cy[cur] - cy;
+  const cands = [];
+  for (const j of nbrs(g, open, cur)) {
+    const dr = Math.hypot(g.cx[j] - cx, g.cy[j] - cy) - rc;
+    if (mode === "in" && dr < -0.25) cands.push(j);
+    else if (mode === "out" && dr > 0.25) cands.push(j);
+    else if ((mode === "cw" || mode === "ccw") && Math.abs(dr) <= 0.25) {
+      const cross = ax * (g.cy[j] - g.cy[cur]) - ay * (g.cx[j] - g.cx[cur]);
+      if ((mode === "cw" && cross > 0) || (mode === "ccw" && cross < 0)) cands.push(j);
+    }
+  }
+  if (!cands.length) return -1;
+  if (cands.length === 1) return cands[0];
+  const notPrev = cands.filter(j => j !== prev);
+  const pool = notPrev.length ? notPrev : cands;
+  if (heading) {                                      // two cells outward: keep going the way you were
+    let bj = pool[0], bd = -2;
+    for (const j of pool) {
+      const dx = g.cx[j] - g.cx[cur], dy = g.cy[j] - g.cy[cur], L = Math.hypot(dx, dy) || 1;
+      const d = (dx / L) * heading[0] + (dy / L) * heading[1];
+      if (d > bd) { bd = d; bj = j; }
+    }
+    return bj;
+  }
+  return pool[0];                                     // both are legal; take one
+}
+
+function startPlay(index) {
+  const b = built[Math.max(0, Math.min(built.length - 1, index))];
+  if (!b) return;
+  state.playIndex = built.indexOf(b);
+  ps = {
+    g: b.g, open: b.open, m: b.m, idx: state.playIndex,
+    cur: b.g.start, stack: [b.g.start], visited: new Set([b.g.start]),
+    heading: null, moves: 0, startedAt: 0, won: false, cheated: false,
+    unit: cellUnit(b.g), maskId: "fog" + (++maskSeq)
+  };
+  mountPlay();
+  paintPlay();
+}
+
+function mountPlay() {
+  const g = ps.g, theme = THEMES[state.theme];
+  const box = paddedBox(g).join(" ");
+  const lw = strokeFor(g);
+  const u = ps.unit;
+  const vb = g.viewBox;
+  const fog = state.torch;
+  const wall = '<path id="pWalls" d="' + wallsPath(g, ps.open) + '" fill="none" stroke="' + theme.ink +
+    '" stroke-width="' + lw.toFixed(3) + '" stroke-linecap="round" stroke-linejoin="round"/>';
+  const defs = fog
+    ? '<defs><mask id="' + ps.maskId + '" maskUnits="userSpaceOnUse">' +
+      '<rect x="' + (vb[0] - u * 3) + '" y="' + (vb[1] - u * 3) + '" width="' + (vb[2] + u * 6) +
+      '" height="' + (vb[3] + u * 6) + '" fill="black"/>' +
+      '<g id="pHoles"></g><circle id="pTorch" r="' + (u * 1.9).toFixed(2) + '" fill="white"/>' +
+      "</mask></defs>"
+    : "";
+  // Walls and hints are fogged; the trail, avatar and goal stay visible so a
+  // child can always see where they are and where they are going.
+  const fogged = '<g ' + (fog ? 'mask="url(#' + ps.maskId + ')"' : "") + ">" + wall +
+    '<g id="pHints"></g></g>';
+  const goalCell = g.goal;
+  const stage = document.getElementById("stage");
+  stage.innerHTML =
+    '<svg class="play" id="playSvg" viewBox="' + box + '" preserveAspectRatio="xMidYMid meet" ' +
+    'tabindex="0" role="application" aria-label="Playable maze. Arrow keys or drag to move.">' +
+    defs +
+    '<rect x="' + (vb[0] - u * 3) + '" y="' + (vb[1] - u * 3) + '" width="' + (vb[2] + u * 6) +
+    '" height="' + (vb[3] + u * 6) + '" fill="#ffffff"/>' +
+    fogged +
+    '<path id="pTrail" fill="none" stroke="#f08a2c" stroke-width="' + (lw * 2.4).toFixed(3) +
+    '" stroke-linejoin="round" stroke-linecap="round" opacity=".9"/>' +
+    '<g id="pGoal" transform="translate(' + g.cx[goalCell].toFixed(3) + "," + g.cy[goalCell].toFixed(3) + ')">' +
+    spriteCentred(theme.goal, u * 0.78, null) + "</g>" +
+    '<g id="pAvatar">' + spriteCentred(theme.start, u * 0.7, theme.outline || "#444c5c") + "</g>" +
+    "</svg>";
+
+  const svg = document.getElementById("playSvg");
+  svg.addEventListener("keydown", onKey);
+  svg.addEventListener("pointerdown", onPointerDown);
+  svg.addEventListener("pointermove", onPointerMove);
+  svg.addEventListener("pointerup", endDrag);
+  svg.addEventListener("pointercancel", endDrag);
+  svg.focus({ preventScroll: true });
+
+  const hints = {
+    hex: "Hex has six ways out of every cell: <kbd>Q</kbd><kbd>E</kbd> and <kbd>Z</kbd><kbd>C</kbd> for the diagonals, <kbd>A</kbd><kbd>D</kbd> left and right. Arrows work too — or just drag.",
+    circle: "Arrows follow the screen. <kbd>Q</kbd> goes inward and <kbd>E</kbd> outward, <kbd>Z</kbd> and <kbd>C</kbd> run round the ring. Or just drag."
+  };
+  document.getElementById("keyhint").innerHTML = hints[state.shape] ||
+    "Arrow keys or <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd>, or drag with the mouse or a finger. Retrace your line to rub it out.";
+}
+
+function trailPoints() {
+  const g = ps.g;
+  let d = "M" + (g.entry.x - g.entry.dx * 0.45).toFixed(2) + " " + (g.entry.y - g.entry.dy * 0.45).toFixed(2);
+  for (const c of ps.stack) d += "L" + g.cx[c].toFixed(2) + " " + g.cy[c].toFixed(2);
+  return d;
+}
+
+function paintPlay() {
+  const g = ps.g;
+  document.getElementById("pTrail").setAttribute("d", trailPoints());
+  document.getElementById("pAvatar").setAttribute("transform",
+    "translate(" + g.cx[ps.cur].toFixed(3) + "," + g.cy[ps.cur].toFixed(3) + ")");
+  if (state.torch) {
+    const torch = document.getElementById("pTorch");
+    if (torch) {
+      torch.setAttribute("cx", g.cx[ps.cur].toFixed(3));
+      torch.setAttribute("cy", g.cy[ps.cur].toFixed(3));
+    }
+  }
+  const optimal = Math.max(1, ps.m.len - 1);          // m.len counts cells, not moves
+  document.getElementById("moves").innerHTML = ps.moves + " <span>moves · best possible " + optimal + "</span>";
+  const rec = loadBest();
+  document.getElementById("best").innerHTML = rec
+    ? '<span>your best</span> ' + rec.time.toFixed(1) + "s"
+    : "";
+}
+
+/* fog: add a hole per newly visited cell rather than rebuilding the mask */
+function punchFog(cell) {
+  if (!state.torch) return;
+  const holes = document.getElementById("pHoles");
+  if (!holes) return;
+  const c = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+  c.setAttribute("cx", ps.g.cx[cell].toFixed(3));
+  c.setAttribute("cy", ps.g.cy[cell].toFixed(3));
+  c.setAttribute("r", (ps.unit * 1.25).toFixed(2));
+  c.setAttribute("fill", "white");
+  holes.appendChild(c);
+}
+
+function stepTo(j) {
+  if (!ps || ps.won || j < 0) return false;
+  if (!nbrs(ps.g, ps.open, ps.cur).includes(j)) return false;
+  const prev = ps.stack.length > 1 ? ps.stack[ps.stack.length - 2] : -1;
+  const from = ps.cur;
+  if (j === prev) ps.stack.pop();                     // retrace rubs the line out
+  else ps.stack.push(j);
+  ps.cur = ps.stack[ps.stack.length - 1];
+  ps.moves++;
+  ps.visited.add(ps.cur);
+  punchFog(ps.cur);
+  const dx = ps.g.cx[ps.cur] - ps.g.cx[from], dy = ps.g.cy[ps.cur] - ps.g.cy[from];
+  const L = Math.hypot(dx, dy) || 1;
+  ps.heading = [dx / L, dy / L];
+  if (!ps.startedAt) startClock();
+  if (ps.cur === ps.g.goal) win();
+  paintPlay();
+  return true;
+}
+
+function startClock() {
+  ps.startedAt = performance.now();
+  clearInterval(clockTimer);
+  clockTimer = setInterval(() => {
+    if (!ps || ps.won) return;
+    document.getElementById("clock").textContent = ((performance.now() - ps.startedAt) / 1000).toFixed(1) + "s";
+  }, 100);
+}
+
+function bestKey(i) {
+  return "mw1|" + [state.shape, state.theme, state.diff, state.styles.join("+"),
+    state.count, state.paper, i, state.seed].join("|");
+}
+function loadBest() {
+  try { const v = localStorage.getItem(bestKey(ps.idx)); return v ? JSON.parse(v) : null; }
+  catch (e) { return null; }
+}
+function saveBest(rec) {
+  try { localStorage.setItem(bestKey(ps.idx), JSON.stringify(rec)); } catch (e) { /* private window */ }
+}
+
+function win() {
+  ps.won = true;
+  clearInterval(clockTimer);
+  const secs = (performance.now() - ps.startedAt) / 1000;
+  document.getElementById("clock").textContent = secs.toFixed(1) + "s";
+  const optimal = Math.max(1, ps.m.len - 1);
+  const stars = ps.cheated ? 0 : ps.moves <= optimal * 1.15 ? 3 : ps.moves <= optimal * 1.5 ? 2 : 1;
+  const msg = ps.cheated
+    ? "Finished — with the answer showing."
+    : "★".repeat(stars) + "☆".repeat(3 - stars) + "  You made it!";
+  document.getElementById("wonMsg").textContent = msg;
+  document.getElementById("live").textContent = "Maze solved in " + ps.moves + " moves, " + secs.toFixed(1) + " seconds.";
+  if (!ps.cheated) {
+    const prev = loadBest();
+    if (!prev || secs < prev.time) saveBest({ time: secs, moves: ps.moves });
+  }
+}
+
+/* ---- keyboard ---- */
+function onKey(e) {
+  if (!ps || ps.won) return;
+  const t = e.target;
+  if (t && (t.tagName === "INPUT" || t.tagName === "SELECT" || t.tagName === "TEXTAREA")) return;
+  const prev = ps.stack.length > 1 ? ps.stack[ps.stack.length - 2] : -1;
+  if (state.shape === "circle" && POLAR_KEYS[e.code]) {
+    e.preventDefault();
+    stepTo(pickPolar(ps.g, ps.open, ps.cur, POLAR_KEYS[e.code], prev, ps.heading));
+    return;
+  }
+  let v = DIR_KEYS[e.code];
+  if (!v && state.shape === "hex") v = HEX_KEYS[e.code];
+  if (!v) return;
+  e.preventDefault();
+  const j = pickByDirection(ps.g, ps.open, ps.cur, prev, ps.heading, v[0], v[1]);
+  if (j === -2) flashHint();
+  else stepTo(j);
+}
+
+function flashHint() {
+  const el = document.getElementById("keyhint");
+  if (!el) return;
+  el.style.color = "var(--accent-ink)";
+  setTimeout(() => { el.style.color = ""; }, 400);
+}
+
+/* ---- drag ---- */
+let dragging = false, lastPt = null;
+function svgPoint(e) {
+  const svg = document.getElementById("playSvg");
+  const ctm = svg.getScreenCTM();
+  if (!ctm) return null;
+  const p = svg.createSVGPoint();
+  p.x = e.clientX; p.y = e.clientY;
+  const q = p.matrixTransform(ctm.inverse());
+  return [q.x, q.y];
+}
+/* nearest of {cur} ∪ open neighbours ∪ previous — a relative test, so it works
+   whatever the cell spacing is (1 square, ~1.73 hex, 0.8-1.6 circle arcs) */
+function nearestStep(pt) {
+  const g = ps.g;
+  const cand = [ps.cur].concat(nbrs(g, ps.open, ps.cur));
+  const prev = ps.stack.length > 1 ? ps.stack[ps.stack.length - 2] : -1;
+  if (prev >= 0 && cand.indexOf(prev) < 0) cand.push(prev);
+  let bj = ps.cur, bd = Infinity;
+  for (const j of cand) {
+    const d = Math.hypot(g.cx[j] - pt[0], g.cy[j] - pt[1]);
+    if (d < bd) { bd = d; bj = j; }
+  }
+  if (bd > ps.unit * 2) return ps.cur;                // pointer is miles away
+  return bj;
+}
+function onPointerDown(e) {
+  if (!ps || ps.won) return;
+  const pt = svgPoint(e);
+  if (!pt) return;
+  const near = Math.hypot(ps.g.cx[ps.cur] - pt[0], ps.g.cy[ps.cur] - pt[1]);
+  if (near > ps.unit * 1.6) return;                   // start the drag on the avatar
+  dragging = true; lastPt = pt;
+  try { e.target.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
+  e.preventDefault();
+  document.getElementById("playSvg").focus({ preventScroll: true });
+}
+function onPointerMove(e) {
+  if (!dragging || !ps || ps.won) return;
+  const pt = svgPoint(e);
+  if (!pt) return;
+  // interpolate: a fast flick covers several cells between samples
+  const dist = Math.hypot(pt[0] - lastPt[0], pt[1] - lastPt[1]);
+  const steps = Math.max(1, Math.ceil(dist / (ps.unit * 0.3)));
+  for (let s = 1; s <= steps; s++) {
+    const q = [lastPt[0] + (pt[0] - lastPt[0]) * s / steps, lastPt[1] + (pt[1] - lastPt[1]) * s / steps];
+    const j = nearestStep(q);
+    if (j !== ps.cur) stepTo(j);
+    if (ps.won) break;
+  }
+  lastPt = pt;
+}
+function endDrag(e) {
+  dragging = false;
+  try { if (e && e.target.releasePointerCapture) e.target.releasePointerCapture(e.pointerId); } catch (err) { /* ignore */ }
+}
+
+/* ---- hints ---- */
+function showHint() {
+  if (!ps || ps.won) return;
+  const g = ps.g;
+  const r = route(g, ps.open, ps.cur, g.goal).slice(1, 4);
+  const host = document.getElementById("pHints");
+  if (!host) return;
+  host.innerHTML = r.map(c =>
+    '<circle cx="' + g.cx[c].toFixed(2) + '" cy="' + g.cy[c].toFixed(2) +
+    '" r="' + (ps.unit * 0.14).toFixed(3) + '" fill="#f08a2c" opacity=".75"/>').join("");
+  setTimeout(() => { if (host) host.innerHTML = ""; }, 2500);
+}
+function showAnswer() {
+  if (!ps) return;
+  const g = ps.g;
+  const r = route(g, ps.open, ps.cur, g.goal);
+  const host = document.getElementById("pHints");
+  if (!host || !r.length) return;
+  ps.cheated = true;
+  host.innerHTML = '<path d="M' + r.map(c => g.cx[c].toFixed(2) + " " + g.cy[c].toFixed(2)).join("L") +
+    '" fill="none" stroke="#f08a2c" stroke-width="' + (strokeFor(g) * 1.8).toFixed(3) +
+    '" stroke-linejoin="round" stroke-linecap="round" opacity=".55"/>';
+  document.getElementById("wonMsg").textContent = "Answer showing — this run won't be scored.";
+}
+
+/* ---- challenge links ---- */
+let hashGuard = false;
+function linkFor(i) {
+  const p = new URLSearchParams({
+    play: "1", v: "1", shape: state.shape, theme: state.theme, diff: state.diff,
+    styles: state.styles.join("+"), count: String(state.count), paper: state.paper,
+    i: String(i), seed: state.seed
+  });
+  return location.origin + location.pathname + "#" + p.toString();
+}
+function applyHash() {
+  let p;
+  try { p = new URLSearchParams(location.hash.replace(/^#/, "")); } catch (e) { return false; }
+  if (p.get("play") !== "1") return false;
+  const shape = p.get("shape"), theme = p.get("theme"), diff = p.get("diff"), paper = p.get("paper");
+  if (THEMES[theme]) state.theme = theme;
+  if (SHAPES[shape]) state.shape = shape;
+  if (DIFFS[diff] || diff === "ladder") state.diff = diff;
+  if (PAPERS[paper]) state.paper = paper;
+  const styles = (p.get("styles") || "").split("+").filter(s => STYLES[s]);
+  if (styles.length) state.styles = styles;
+  const count = parseInt(p.get("count"), 10);
+  if (count >= 1 && count <= 8) state.count = count;
+  if (p.get("seed")) state.seed = p.get("seed");
+  state.playIndex = Math.max(0, Math.min(state.count - 1, parseInt(p.get("i"), 10) || 0));
+  state.mode = "play";
+  return true;
+}
+
 /* ---------------- render ---------------- */
 function render() {
   const theme = THEMES[state.theme];
@@ -941,6 +1499,7 @@ function render() {
 
   const base = hashSeed(state.seed + "|" + shape);
   const cards = [], stats = [];
+  built.length = 0;                                   // rebuilt every render
 
   for (let i = 0; i < state.count; i++) {
     const diffKey = state.diff === "ladder"
@@ -948,14 +1507,17 @@ function render() {
       : state.diff;
     const styleKey = state.styles[i % state.styles.length];
     const spec = specFor(diffKey, styleKey, shape, boxW, boxH);
-    const { g, open, m } = bestMaze(shape, spec, theme, (base + i * 0x45D9F3B) >>> 0);
+    const picked = bestMaze(shape, spec, theme, (base + i * 0x45D9F3B) >>> 0);
+    if (!picked) continue;                             // no candidate scored: skip
+    const { g, open, m } = picked;
+    built.push({ g: g, open: open, m: m, diffKey: diffKey, styleKey: styleKey });
 
     const svg = mazeSVG(g, open, m, theme, state.solution);
     const vb = g.viewBox, pad = Math.max(vb[2], vb[3]) * 0.035;
     const pct = p => (((p - vb[0] + pad) / (vb[2] + pad * 2)) * 100).toFixed(2);
 
     cards.push(
-      '<div class="card">' +
+      '<div class="card playable" data-maze="' + i + '" title="Click to play this maze">' +
         '<div class="card-head">' +
           '<span class="num" style="color:' + theme.ink + '">Maze ' + (i + 1) + "</span>" +
           '<span class="lvl">' + DIFFS[diffKey].label + " · " + STYLES[styleKey].label + "</span>" +
@@ -991,6 +1553,40 @@ function render() {
     "since solving backwards from the goal is the usual shortcut. Not printed.</span></div>" + stats.join("");
 
   fitToPage(grows, paper.h);
+  lastFit = () => fitToPage(grows, paper.h);
+
+  // clicking a maze on the sheet plays it
+  sheet.querySelectorAll(".card.playable").forEach(el => {
+    el.addEventListener("click", () => {
+      state.mode = "play";
+      const chip = document.querySelector('input[name=mode][value=play]');
+      if (chip) chip.checked = true;
+      state.playIndex = Number(el.getAttribute("data-maze")) || 0;
+      render();
+    });
+  });
+
+  // ---- mode: the sheet is parked, never display:none, so fitToPage can measure
+  const playing = state.mode === "play";
+  document.getElementById("modeBlurb").textContent = MODES[state.mode].blurb;
+  document.getElementById("sheetScroll").classList.toggle("parked", playing);
+  document.getElementById("play").hidden = !playing;
+  document.getElementById("playBox").hidden = !playing;
+  if (playing) {
+    state.playIndex = Math.max(0, Math.min(built.length - 1, state.playIndex));
+    radioChips(document.getElementById("playPick"),
+      built.map((b, i) => ({ value: String(i), label: "Maze " + (i + 1) })),
+      "playpick", () => String(state.playIndex),
+      v => { state.playIndex = Number(v); });        // render() restarts play below
+    document.getElementById("torch").checked = state.torch;
+    document.getElementById("clock").textContent = "0.0s";
+    document.getElementById("wonMsg").textContent = "";
+    document.getElementById("linkNote").textContent = "";
+    startPlay(state.playIndex);
+  } else {
+    clearInterval(clockTimer);
+    ps = null;
+  }
 
   let pageStyle = document.getElementById("pageRule");
   if (!pageStyle) { pageStyle = document.createElement("style"); pageStyle.id = "pageRule"; document.head.appendChild(pageStyle); }
@@ -998,6 +1594,22 @@ function render() {
     "@page { size: " + (state.paper === "a4" ? "A4" : "letter") + " portrait; margin: 12mm; }" +
     "@media print { .sheet { width: " + (paper.w - 24) + "mm !important; } }";
 }
+
+// a challenge link opens straight into that exact maze
+applyHash();
+const modeChip = document.querySelector('input[name=mode][value=' + state.mode + ']');
+if (modeChip) modeChip.checked = true;
+const themeChip = document.querySelector('input[name=theme][value=' + state.theme + ']');
+if (themeChip) themeChip.checked = true;
+const shapeChip = document.querySelector('input[name=shape][value=' + state.shape + ']');
+if (shapeChip) shapeChip.checked = true;
+const diffChip = document.querySelector('input[name=diff][value=' + state.diff + ']');
+if (diffChip) diffChip.checked = true;
+const countChip = document.querySelector('input[name=count][value="' + state.count + '"]');
+if (countChip) countChip.checked = true;
+document.querySelectorAll('input[name=style]').forEach(b => { b.checked = state.styles.includes(b.value); });
+document.getElementById("seed").value = state.seed;
+document.getElementById("paper").value = state.paper;
 
 render();
 

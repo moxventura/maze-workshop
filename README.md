@@ -29,6 +29,29 @@ open `index.html` locally if you prefer.
 - **Seeded** — the same seed always produces the same sheet.
 - Optional solution overlay, and a difficulty read-out that is not printed.
 
+## Playing
+
+Switch the **Mode** control to **Play**, or just click any maze on the sheet.
+
+- **Drag** a line with the mouse or a finger, **or** steer with the arrow keys
+  or `WASD`. Retrace your line to rub it out, exactly like a pencil.
+- Hex mazes have six ways out of every cell and no straight up or down, so they
+  also get six exact keys: `Q`/`E` and `Z`/`C` for the diagonals, `A`/`D` for
+  left and right. The arrows still work — they take the only open way when
+  there is one, and otherwise carry on the way you were going.
+- **Timer, move count and your personal best** per maze, saved in the browser.
+  Stars are awarded against the shortest possible route.
+- **Torchlight** hides the walls beyond a small radius and reveals them as you
+  explore. The goal stays visible so you always know where you are heading.
+- **Stuck?** dots in the next few steps. **Show the way** draws the rest of the
+  route, and the run stops being scored.
+- **Copy link** gives you a URL carrying the exact maze — shape, theme,
+  difficulty, styles, sheet layout and seed — so two people can race the same
+  one.
+
+Movement is "walk the graph": a legal move is an open edge to a neighbouring
+cell, which is why all four shapes are playable with no per-shape movement code.
+
 ## Printing
 
 Press the Print button, or Ctrl/⌘+P. The sheet is sized against the real
