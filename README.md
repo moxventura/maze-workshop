@@ -10,6 +10,14 @@ open `index.html` locally if you prefer.
 
 ## What it does
 
+- **4 grid shapes** — Square, Circle, Hex and Picture:
+  - **Circle** is a theta maze: concentric rings that subdivide as they widen,
+    entered at the top with the goal in the hub.
+  - **Hex** is a sigma maze — six ways out of every cell, so there is no
+    straight line to follow.
+  - **Picture** cuts the maze to the silhouette of the theme's character, so
+    the unicorn maze is unicorn-shaped. Enter at the top of the shape, leave at
+    the bottom.
 - **5 themes** — Mineshaft, Explorer, Unicorn, Space, Dino. Each has its own
   pixel-art character at the entrance, a goal sprite at the exit, and ink colour.
 - **5 maze styles**, multi-select and dealt out across the page one per maze:
@@ -41,9 +49,15 @@ textbook depth-first carve, which produces long corridors with few real choices:
 - **Off-corner entrance and exit** — removes the "just head for the far corner"
   shortcut, while staying far enough apart to keep the journey long.
 
-Each maze is the best of 22 candidates, scored on *forks along the route* ×
+Each maze is the best of 16 candidates, scored on *forks along the route* ×
 *how far a wrong turn carries you before it is provably wrong*, with candidates
-whose route is too short rejected outright.
+whose route is too short rejected outright. The score is also weighted towards
+mazes that keep branching **near the exit**, because working backwards from the
+goal is the usual shortcut — maze designers counter it by branching in both
+directions.
+
+All four shapes share one carving core: a grid is just cells, neighbours and
+wall geometry, so braiding, bias, scoring and solving are shape-agnostic.
 
 Sources: Walter Pullen's [Think Labyrinth](https://www.astrolog.org/labyrnth/algrithm.htm)
 and Jamis Buck's *Mazes for Programmers*.

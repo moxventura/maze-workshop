@@ -168,6 +168,12 @@
       </fieldset>
 
       <fieldset>
+        <legend>Shape</legend>
+        <div class="chips" id="shapeChips"></div>
+        <p class="hint" id="shapeBlurb"></p>
+      </fieldset>
+
+      <fieldset>
         <legend>Maze styles</legend>
         <div class="chips" id="styleChips"></div>
         <p class="hint" id="styleBlurb"></p>
@@ -221,51 +227,69 @@
   </div>
 </div>
 
+
 <script>
 (function () {
   "use strict";
 
-  /* ---------------- seeded random ---------------- */
-  function hashSeed(str) {
-    let h = 2166136261 >>> 0;
-    for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 16777619) >>> 0; }
-    return h >>> 0;
-  }
-  function mulberry32(a) {
-    return function () {
-      a |= 0; a = (a + 0x6D2B79F5) | 0;
-      let t = Math.imul(a ^ (a >>> 15), 1 | a);
-      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-    };
-  }
+/* ============================================================
+   Generic maze core: a grid is just cells + neighbours + geometry,
+   so the same carving, braiding and scoring work on square, circular
+   (theta), hexagonal (sigma) and picture-masked grids.
+   ============================================================ */
 
-  /* ---------------- maze generation ----------------
-     Strategies from Walter Pullen's Think Labyrinth and Jamis Buck's
-     Mazes for Programmers:
-       growing tree with mixed selection -> "river" (long decoys, not stubs)
-       passage bias                      -> harder travelled against the grain
-       braiding (loops)                  -> beats wall-following + dead-end filling
-       spiral trap                       -> you can't see where a spiral comes out
-       off-corner exit                   -> kills "just head for the far corner"
-  --------------------------------------------------- */
-  const DIRS = { N: [0, -1], S: [0, 1], E: [1, 0], W: [-1, 0] };
-  const OPP = { N: "S", S: "N", E: "W", W: "E" };
-  const KEYS = ["N", "S", "E", "W"];
+const TAU = Math.PI * 2;
+const ek = (n, i, j) => (i < j ? i * n + j : j * n + i);
 
-  function newWalls(cols, rows) {
-    const w = [];
-    for (let x = 0; x < cols; x++) { w.push([]); for (let y = 0; y < rows; y++) w[x].push({ N: true, S: true, E: true, W: true }); }
-    return w;
+function f(v) { return Math.abs(v) < 1e-9 ? "0" : (+v.toFixed(3)).toString(); }
+function line(x1, y1, x2, y2) { return "M" + f(x1) + " " + f(y1) + "L" + f(x2) + " " + f(y2); }
+function arc(cx, cy, r, a0, a1) {
+  const x1 = cx + r * Math.cos(a0), y1 = cy + r * Math.sin(a0);
+  const x2 = cx + r * Math.cos(a1), y2 = cy + r * Math.sin(a1);
+  const large = Math.abs(a1 - a0) > Math.PI ? 1 : 0;
+  return "M" + f(x1) + " " + f(y1) + "A" + f(r) + " " + f(r) + " 0 " + large + " 1 " + f(x2) + " " + f(y2);
+}
+
+/* ---------- a tiny builder the four shapes share ---------- */
+function Grid() {
+  this.n = 0; this.nb = []; this.cx = []; this.cy = [];
+  this.seg = new Map(); this.wt = new Map(); this.border = [];
+  this.goalInside = false; this.blocked = new Set(); this.preOpen = [];
+}
+Grid.prototype.cell = function (x, y) { this.cx.push(x); this.cy.push(y); this.nb.push([]); return this.n++; };
+Grid.prototype.join = function (i, j, d, weight) {
+  this.nb[i].push(j); this.nb[j].push(i);
+  const k = ek(this.n, i, j);
+  this.seg.set(k, d);
+  if (weight && weight !== 1) this.wt.set(k, weight);
+};
+Grid.prototype.edge = function (d, mx, my, nx, ny) {
+  this.border.push({ d: d, x: mx, y: my, dx: nx, dy: ny });
+  return this.border.length - 1;
+};
+Grid.prototype.finish = function (entryIdx, exitIdx) {
+  this.entry = this.border[entryIdx];
+  this.exit = exitIdx == null ? null : this.border[exitIdx];
+  const skip = new Set([entryIdx, exitIdx]);
+  this.borderPath = this.border.filter((_, i) => !skip.has(i)).map(b => b.d).join("");
+  return this;
+};
+
+/* ---------- 1. square ---------- */
+function squareGrid(spec, rnd) {
+  const cols = spec.cols, rows = spec.rows, g = new Grid();
+  const id = (x, y) => x * rows + y;
+  for (let x = 0; x < cols; x++) for (let y = 0; y < rows; y++) g.cell(x + 0.5, y + 0.5);
+  g.n = cols * rows;
+  for (let x = 0; x < cols; x++) for (let y = 0; y < rows; y++) {
+    if (x + 1 < cols) g.join(id(x, y), id(x + 1, y), line(x + 1, y, x + 1, y + 1), spec.hbias);
+    if (y + 1 < rows) g.join(id(x, y), id(x, y + 1), line(x, y + 1, x + 1, y + 1), 1);
   }
-  function link(w, x, y, k) { const [dx, dy] = DIRS[k]; w[x][y][k] = false; w[x + dx][y + dy][OPP[k]] = false; }
-  function openCount(c) { return 4 - (c.N + c.S + c.E + c.W); }
-
-  function spiralRegion(w, cols, rows, size) {
-    const region = new Set();
-    if (size < 3) return region;
+  // spiral trap: a unicursal spiral the carve must route around
+  const size = Math.min(spec.spiral || 0, Math.min(cols, rows) - 4);
+  if (size >= 3) {
     const x0 = Math.floor((cols - size) / 2), y0 = Math.floor((rows - size) / 2);
-    const order = [];
+    const order = [], seen = new Set();
     let lo = 0, hi = size - 1;
     while (lo <= hi) {
       for (let i = lo; i <= hi; i++) order.push([x0 + i, y0 + lo]);
@@ -276,517 +300,704 @@
       }
       lo++; hi--;
     }
-    const seen = new Set(), cells = [];
+    const cells = [];
     for (const [x, y] of order) {
-      const id = x + "," + y;
-      if (!seen.has(id)) { seen.add(id); cells.push([x, y]); region.add(id); }
+      const key = x + "," + y;
+      if (!seen.has(key)) { seen.add(key); cells.push([x, y]); g.blocked.add(id(x, y)); }
     }
-    for (let i = 0; i + 1 < cells.length; i++) {
-      const [ax, ay] = cells[i], [bx, by] = cells[i + 1];
-      for (const k of KEYS) if (ax + DIRS[k][0] === bx && ay + DIRS[k][1] === by) { link(w, ax, ay, k); break; }
-    }
-    return region;
+    for (let i = 0; i + 1 < cells.length; i++)
+      g.preOpen.push(ek(g.n, id(cells[i][0], cells[i][1]), id(cells[i + 1][0], cells[i + 1][1])));
   }
+  let sx = 0, gx = cols - 1;
+  if (spec.offset) {
+    sx = Math.round((0.05 + rnd() * 0.25) * (cols - 1));
+    gx = Math.round((0.70 + rnd() * 0.25) * (cols - 1));
+  }
+  let ei = -1, xi = -1;
+  for (let x = 0; x < cols; x++) {
+    const a = g.edge(line(x, 0, x + 1, 0), x + 0.5, 0, 0, 1);
+    if (x === sx) ei = a;
+    const b = g.edge(line(x, rows, x + 1, rows), x + 0.5, rows, 0, -1);
+    if (x === gx) xi = b;
+  }
+  for (let y = 0; y < rows; y++) {
+    g.edge(line(0, y, 0, y + 1), 0, y + 0.5, 1, 0);
+    g.edge(line(cols, y, cols, y + 1), cols, y + 0.5, -1, 0);
+  }
+  g.start = id(sx, 0); g.goal = id(gx, rows - 1);
+  g.viewBox = [0, 0, cols, rows];
+  return g.finish(ei, xi);
+}
 
-  function growingTree(w, cols, rows, rnd, recent, hbias, blocked) {
-    let start = null;
-    for (let x = 0; x < cols && !start; x++) for (let y = 0; y < rows && !start; y++) if (!blocked.has(x + "," + y)) start = [x, y];
-    const visited = new Set(blocked);
-    visited.add(start[0] + "," + start[1]);
-    const active = [start];
-    while (active.length) {
-      const idx = rnd() < recent ? active.length - 1 : Math.floor(rnd() * active.length);
-      const [x, y] = active[idx];
-      const opts = [];
-      for (const k of KEYS) {
-        const nx = x + DIRS[k][0], ny = y + DIRS[k][1];
-        if (nx >= 0 && nx < cols && ny >= 0 && ny < rows && !visited.has(nx + "," + ny))
-          opts.push([k, nx, ny, (k === "E" || k === "W") ? hbias : 1]);
+/* ---------- 2. circle (theta): rings that subdivide outward ---------- */
+function circleGrid(spec) {
+  const rings = spec.rings, g = new Grid(), cxc = rings, cyc = rings;
+  const counts = [1], rowOf = [[0]];
+  g.cell(cxc, cyc);                                   // the hub
+  for (let r = 1; r < rings; r++) {
+    const prev = counts[r - 1];
+    const ratio = Math.max(1, Math.round((TAU * r) / prev));   // keep cells squarish
+    const cnt = prev * ratio;
+    counts.push(cnt);
+    const row = [];
+    for (let i = 0; i < cnt; i++) {
+      const a = (i + 0.5) * TAU / cnt, rad = r + 0.5;
+      row.push(g.cell(cxc + rad * Math.cos(a), cyc + rad * Math.sin(a)));
+    }
+    rowOf.push(row);
+  }
+  g.n = g.cx.length;
+  for (let r = 1; r < rings; r++) {
+    const cnt = counts[r], row = rowOf[r], prevRow = rowOf[r - 1], prevCnt = counts[r - 1];
+    for (let i = 0; i < cnt; i++) {
+      const a0 = i * TAU / cnt, a1 = (i + 1) * TAU / cnt;
+      if (cnt > 1)                                     // wall to the next cell round the ring
+        g.join(row[i], row[(i + 1) % cnt], line(cxc + r * Math.cos(a1), cyc + r * Math.sin(a1),
+          cxc + (r + 1) * Math.cos(a1), cyc + (r + 1) * Math.sin(a1)), 1);
+      const inward = prevRow[Math.floor(i * prevCnt / cnt)];
+      g.join(row[i], inward, arc(cxc, cyc, r, a0, a1), spec.hbias);  // bias = run round, not in
+    }
+  }
+  const outer = rowOf[rings - 1], oc = counts[rings - 1];
+  // enter from the top: pick the outer cell NEAREST that angle, never a
+  // tolerance test (a target exactly between two cells matches neither)
+  let ei = 0, bestGap = Infinity;
+  for (let i = 0; i < oc; i++) {
+    const a0 = i * TAU / oc, a1 = (i + 1) * TAU / oc, am = (a0 + a1) / 2;
+    const b = g.edge(arc(cxc, cyc, rings, a0, a1),
+      cxc + rings * Math.cos(am), cyc + rings * Math.sin(am), -Math.cos(am), -Math.sin(am));
+    const gap = Math.abs(am - TAU * 0.75);
+    if (gap < bestGap) { bestGap = gap; ei = b; g.start = outer[i]; }
+  }
+  g.goal = 0;
+  g.goalInside = true;
+  g.viewBox = [0, 0, rings * 2, rings * 2];
+  return g.finish(ei, null);
+}
+
+/* ---------- 3. hex (sigma): pointy-top, odd-r offset ---------- */
+function hexGrid(spec) {
+  const cols = spec.cols, rows = spec.rows, g = new Grid(), S = 1;
+  const W = Math.sqrt(3) * S, H = 1.5 * S;
+  const id = (c, r) => (c < 0 || r < 0 || c >= cols || r >= rows ? -1 : r * cols + c);
+  const cxOf = (c, r) => W * (c + 0.5 * (r & 1)) + W / 2;
+  const cyOf = r => H * r + S;
+  for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) g.cell(cxOf(c, r), cyOf(r));
+  g.n = cols * rows;
+  const corner = (c, r, k) => {
+    const a = (30 + 60 * k) * Math.PI / 180;
+    return [cxOf(c, r) + S * Math.cos(a), cyOf(r) + S * Math.sin(a)];
+  };
+  // edge k (corner k -> k+1): 0 SE, 1 SW, 2 W, 3 NW, 4 NE, 5 E
+  const dirs = r => (r & 1)
+    ? [[1, 1], [0, 1], [-1, 0], [0, -1], [1, -1], [1, 0]]
+    : [[0, 1], [-1, 1], [-1, 0], [-1, -1], [0, -1], [1, 0]];
+  for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
+    const i = id(c, r), dd = dirs(r);
+    for (let k = 0; k < 6; k++) {
+      const [dc, dr] = dd[k], j = id(c + dc, r + dr);
+      const p = corner(c, r, k), q = corner(c, r, (k + 1) % 6);
+      const d = line(p[0], p[1], q[0], q[1]);
+      if (j < 0) {
+        g.edge(d, (p[0] + q[0]) / 2, (p[1] + q[1]) / 2,
+          cxOf(c, r) - (p[0] + q[0]) / 2, cyOf(r) - (p[1] + q[1]) / 2);
+      } else if (j > i) {
+        g.join(i, j, d, k === 2 || k === 5 ? spec.hbias : 1);
       }
-      if (!opts.length) { active.splice(idx, 1); continue; }
-      let total = 0; for (const o of opts) total += o[3];
-      let r = rnd() * total, pick = opts[opts.length - 1];
-      for (const o of opts) { r -= o[3]; if (r <= 0) { pick = o; break; } }
-      link(w, x, y, pick[0]);
-      visited.add(pick[1] + "," + pick[2]);
-      active.push([pick[1], pick[2]]);
     }
   }
+  // entry on the top-left hex, exit on the bottom-right one
+  let ei = -1, xi = -1, best = 1e9, worst = -1e9;
+  g.border.forEach((b, idx) => {
+    const s = b.y * 1000 + b.x, t = b.y * 1000 + b.x;
+    if (b.dy > 0.2 && s < best) { best = s; ei = idx; }
+    if (b.dy < -0.2 && t > worst) { worst = t; xi = idx; }
+  });
+  g.start = 0; g.goal = g.n - 1;
+  // snap start/goal to the cells those edges belong to
+  let bs = 1e9, bg = -1e9;
+  for (let i = 0; i < g.n; i++) {
+    const d1 = Math.hypot(g.cx[i] - g.border[ei].x, g.cy[i] - g.border[ei].y);
+    if (d1 < bs) { bs = d1; g.start = i; }
+    const d2 = -Math.hypot(g.cx[i] - g.border[xi].x, g.cy[i] - g.border[xi].y);
+    if (d2 > bg) { bg = d2; g.goal = i; }
+  }
+  g.viewBox = [0, 0, W * cols + W, H * (rows - 1) + 2 * S];
+  return g.finish(ei, xi);
+}
 
-  function attachRegion(w, cols, rows, region, rnd, count) {
-    const border = [];
-    for (const id of region) {
+/* ---------- 4. picture: a square grid masked to a silhouette ---------- */
+function diamondArt(r) {
+  const rows = [];
+  for (let y = 0; y < 2 * r + 1; y++) {
+    let s = "";
+    for (let x = 0; x < 2 * r + 1; x++) s += (Math.abs(x - r) + Math.abs(y - r) <= r ? "#" : ".");
+    rows.push(s);
+  }
+  return rows;
+}
+
+function pictureGrid(spec, art) {
+  const aw = art[0].length, ah = art.length;
+  const k = Math.max(1, Math.round(spec.cols / aw));
+  const cols = aw * k, rows = ah * k, g = new Grid();
+  const on = [];
+  for (let x = 0; x < cols; x++) {
+    on.push([]);
+    for (let y = 0; y < rows; y++) on[x].push(art[Math.floor(y / k)][Math.floor(x / k)] !== ".");
+  }
+  // keep only the largest connected blob, or the maze would be in pieces
+  const seen = [], comps = [];
+  for (let x = 0; x < cols; x++) { seen.push([]); for (let y = 0; y < rows; y++) seen[x].push(false); }
+  for (let x = 0; x < cols; x++) for (let y = 0; y < rows; y++) {
+    if (!on[x][y] || seen[x][y]) continue;
+    const comp = [], q = [[x, y]]; seen[x][y] = true;
+    while (q.length) {
+      const [a, b] = q.pop(); comp.push([a, b]);
+      for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        const nx = a + dx, ny = b + dy;
+        if (nx >= 0 && nx < cols && ny >= 0 && ny < rows && on[nx][ny] && !seen[nx][ny]) {
+          seen[nx][ny] = true; q.push([nx, ny]);
+        }
+      }
+    }
+    comps.push(comp);
+  }
+  comps.sort((a, b) => b.length - a.length);
+  const keep = new Set((comps[0] || []).map(([x, y]) => x + "," + y));
+  const idx = new Map();
+  for (let y = 0; y < rows; y++) for (let x = 0; x < cols; x++) {
+    if (keep.has(x + "," + y)) idx.set(x + "," + y, g.cell(x + 0.5, y + 0.5));
+  }
+  const at = (x, y) => (idx.has(x + "," + y) ? idx.get(x + "," + y) : -1);
+  for (let x = 0; x < cols; x++) for (let y = 0; y < rows; y++) {
+    const i = at(x, y);
+    if (i < 0) continue;
+    const e = at(x + 1, y), s = at(x, y + 1);
+    if (e >= 0) g.join(i, e, line(x + 1, y, x + 1, y + 1), spec.hbias);
+    if (s >= 0) g.join(i, s, line(x, y + 1, x + 1, y + 1), 1);
+  }
+  let ei = -1, xi = -1, topY = 1e9, botY = -1e9;
+  for (let x = 0; x < cols; x++) for (let y = 0; y < rows; y++) {
+    const i = at(x, y);
+    if (i < 0) continue;
+    if (at(x, y - 1) < 0) {
+      const b = g.edge(line(x, y, x + 1, y), x + 0.5, y, 0, 1);
+      if (y < topY) { topY = y; ei = b; g.start = i; }
+    }
+    if (at(x, y + 1) < 0) {
+      const b = g.edge(line(x, y + 1, x + 1, y + 1), x + 0.5, y + 1, 0, -1);
+      if (y > botY) { botY = y; xi = b; g.goal = i; }
+    }
+    if (at(x - 1, y) < 0) g.edge(line(x, y, x, y + 1), x, y + 0.5, 1, 0);
+    if (at(x + 1, y) < 0) g.edge(line(x + 1, y, x + 1, y + 1), x + 1, y + 0.5, -1, 0);
+  }
+  g.viewBox = [0, 0, cols, rows];
+  return g.finish(ei, xi);
+}
+
+/* ---------- carving, braiding (shape-agnostic) ---------- */
+function carve(g, rnd, recent, blocked) {
+  const open = new Set(g.preOpen);
+  let startCell = -1;
+  for (let i = 0; i < g.n && startCell < 0; i++) if (!blocked.has(i)) startCell = i;
+  if (startCell < 0) return open;
+  const seen = new Set(blocked); seen.add(startCell);
+  const active = [startCell];
+  while (active.length) {
+    const at = rnd() < recent ? active.length - 1 : Math.floor(rnd() * active.length);
+    const i = active[at], opts = [];
+    let total = 0;
+    for (const j of g.nb[i]) if (!seen.has(j)) { const w = g.wt.get(ek(g.n, i, j)) || 1; opts.push([j, w]); total += w; }
+    if (!opts.length) { active.splice(at, 1); continue; }
+    let r = rnd() * total, pick = opts[opts.length - 1][0];
+    for (const [j, w] of opts) { r -= w; if (r <= 0) { pick = j; break; } }
+    open.add(ek(g.n, i, pick)); seen.add(pick); active.push(pick);
+  }
+  return open;
+}
+
+function attach(g, open, rnd, count) {
+  const cands = [];
+  for (const i of g.blocked) for (const j of g.nb[i]) if (!g.blocked.has(j)) cands.push([i, j]);
+  for (let i = cands.length - 1; i > 0; i--) { const j = Math.floor(rnd() * (i + 1)); [cands[i], cands[j]] = [cands[j], cands[i]]; }
+  for (const [i, j] of cands.slice(0, count)) open.add(ek(g.n, i, j));
+}
+
+const deg = (g, open, i) => { let d = 0; for (const j of g.nb[i]) if (open.has(ek(g.n, i, j))) d++; return d; };
+
+function braid(g, open, rnd, ratio) {
+  if (ratio <= 0) return;
+  const ends = [];
+  for (let i = 0; i < g.n; i++) if (deg(g, open, i) === 1) ends.push(i);
+  for (let i = ends.length - 1; i > 0; i--) { const j = Math.floor(rnd() * (i + 1)); [ends[i], ends[j]] = [ends[j], ends[i]]; }
+  for (const i of ends.slice(0, Math.floor(ends.length * ratio))) {
+    if (deg(g, open, i) !== 1) continue;
+    const shut = g.nb[i].filter(j => !open.has(ek(g.n, i, j)));
+    if (!shut.length) continue;
+    shut.sort((a, b) => (deg(g, open, a) === 1 ? 0 : 1) - (deg(g, open, b) === 1 ? 0 : 1));
+    const pick = rnd() < 0.7 ? shut[0] : shut[Math.floor(rnd() * shut.length)];
+    open.add(ek(g.n, i, pick));
+  }
+}
+
+function nbrs(g, open, i) {
+  const out = [];
+  for (const j of g.nb[i]) if (open.has(ek(g.n, i, j))) out.push(j);
+  return out;
+}
+
+function route(g, open, a, b) {
+  const prev = new Map([[a, -1]]); const q = [a]; let h = 0;
+  while (h < q.length) {
+    const c = q[h++];
+    if (c === b) break;
+    for (const j of nbrs(g, open, c)) if (!prev.has(j)) { prev.set(j, c); q.push(j); }
+  }
+  if (!prev.has(b)) return [];
+  const p = []; let c = b;
+  while (c !== -1) { p.push(c); c = prev.get(c); }
+  return p.reverse();
+}
+
+function score(g, open) {
+  const path = route(g, open, g.start, g.goal);
+  if (!path.length) return null;
+  const pset = new Set(path);
+  let forks = 0, backForks = 0;
+  const tail = Math.floor(path.length * 0.6);
+  path.forEach((c, i) => {
+    if (deg(g, open, c) >= 3) { forks++; if (i >= tail) backForks++; }
+  });
+  const compOf = new Map(), seen = new Set();
+  for (let i = 0; i < g.n; i++) {
+    if (pset.has(i) || seen.has(i)) continue;
+    const comp = [], q = [i]; seen.add(i); let h = 0;
+    while (h < q.length) {
+      const c = q[h++]; comp.push(c);
+      for (const j of nbrs(g, open, c)) if (!pset.has(j) && !seen.has(j)) { seen.add(j); q.push(j); }
+    }
+    for (const c of comp) compOf.set(c, comp.length);
+  }
+  let sum = 0, cnt = 0;
+  for (const c of path) for (const j of nbrs(g, open, c)) if (!pset.has(j)) { sum += compOf.get(j) || 0; cnt++; }
+  const decoy = cnt ? sum / cnt : 0;
+  let junctions = 0;
+  for (let i = 0; i < g.n; i++) if (deg(g, open, i) >= 3) junctions++;
+  // backForks matters because kids solve from the exit: a maze that only
+  // branches near the start is easy to unpick backwards.
+  return {
+    path: path, len: path.length, forks: forks, backForks: backForks,
+    decoy: decoy, junctions: junctions,
+    value: forks * decoy * (0.55 + 0.45 * Math.min(1, backForks / Math.max(1, forks * 0.35)))
+  };
+}
+
+
+/* ---------------- pixel art ---------------- */
+const ART = {"steve":["hhhhhhhh","hhhhhhhh","hssssssh","swbssbws","ssssssss","ssmmmmss","sdddddds","ssssssss"],"alex":["rrrrrrrr","rrrrrrrr","rssssssr","rwgssgwr","rssssssr","rssmmssr","rssssssr","rrssssrr"],"unicorn":["........G.......",".......GG.......",".......GG.......","......GGGG......","...uu.PPPP.uu...","..PPPPPPPPPPPP..","..PuuuuuuuuuuP..","..uuuuuuuuuuuu..","..uuEuuuuuuEuu..","..uuuuuuuuuuuu..","...uuuuuuuuuu...","....uuppppuu....",".....uuuuuu.....","......uuuu......"],"rocket":["......R......",".....RRR.....","....RRRRR....","...WWWWWWW...","...WWWWWWW...","...WWbbbWW...","...WWbbbWW...","...WWWWWWW...","...WWWWWWW...",".RRWWWWWWWRR.","RRRWWWWWWWRRR","RR.WWWWWWW.RR","...RRRRRRR...","....fffff....","....fFFFf....",".....fFf.....","......f......"],"dino":["..........DDDD..",".........DDDDDD.",".........DDwDDD.",".........DDDDDD.",".........DDDDD..",".........DDDD...","..D......DDDD...","..DD...DDDDDD...","..DDDDDDDDDDD...","...DDDDDDDDDD...","....DDDDDDDD....","....DDDDDDD.....","....DD..DD......","....DD..DD......","...DDD..DDD....."],"chest":["oooooooooooooooo","oLLLLLLLLLLLLLLo","oLLLLLLLLLLLLLLo","oLLLLLLLMMLLLLLo","ooooooooMMoooooo","oBBBBBBBMMBBBBBo","oBBBBBBBBBBBBBBo","oBBBBBBBBBBBBBBo","oBBBBBBBBBBBBBBo","oBBBBBBBBBBBBBBo","oooooooooooooooo"],"star":["........S........","........S........","........S........",".......SSS.......",".......SSS.......",".......SSS.......",".SSSSSSSSSSSSSSS.","...SSSSSSSSSSS...","....SSSSSSSSS....",".....SSSSSSS.....",".....SSSSSSS.....",".....SSSSSSS.....","....SSSS.SSSS....","....SS.....SS....","....S.......S....",".................","................."],"egg":[".....eee.....","....eeeee....","...eeeeeee...","...eeeeeee...","..eeeeeeeee..","..eetteeeee..","..eeeeeeeee..",".eeeeeeettee.",".eetteeeeeee.",".eeeeeeeeeee.",".eeeetteeeee.","..eeeeeeett..","..eeeeeeeee..","..eeeeeeeee..","...eeeeeee...",".....eee....."],"rainbow":[".................","........1........","....111121111....","...11222322211...","..1223334333221..",".122344454443221.",".123445565544321.","12334566666543321","1234566...6654321","123456.....654321"]};
+const PAL = {"h":"#3f2a1c","r":"#c76b26","s":"#b48466","w":"#ffffff","b":"#3c44aa","g":"#3f8a48","d":"#6b4a33","m":"#4a2e21","o":"#3a2410","L":"#a0703c","B":"#7a5230","M":"#c8b080","u":"#fcf6ff","P":"#f574b6","p":"#fdb8da","G":"#fac940","e":"#f7f0d9","t":"#a17348","D":"#4c9a52","W":"#e3e9f2","R":"#d8453f","f":"#f08a2c","F":"#fbe06a","S":"#f5c431","1":"#e74c3c","2":"#f39c12","3":"#f7d63d","4":"#55ba68","5":"#4789d7","6":"#9b59b6","E":"#42304d"};
+ART.diamond = diamondArt(7);
+PAL["#"] = "#4fc3e8";
+
+function spriteSVG(name, pxHeight, outline) {
+  const art = ART[name], w = art[0].length, h = art.length;
+  const filled = new Set();
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (art[y][x] !== ".") filled.add(x + "," + y);
+  let body = "";
+  if (outline) {
+    const edge = new Set();
+    for (const id of filled) {
       const [x, y] = id.split(",").map(Number);
-      for (const k of KEYS) {
-        const nx = x + DIRS[k][0], ny = y + DIRS[k][1];
-        if (nx >= 0 && nx < cols && ny >= 0 && ny < rows && !region.has(nx + "," + ny)) border.push([x, y, k]);
+      for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) {
+        const nid = (x + dx) + "," + (y + dy);
+        if (!filled.has(nid)) edge.add(nid);
       }
     }
-    for (let i = border.length - 1; i > 0; i--) { const j = Math.floor(rnd() * (i + 1)); [border[i], border[j]] = [border[j], border[i]]; }
-    for (const [x, y, k] of border.slice(0, count)) link(w, x, y, k);
+    for (const id of edge) {
+      const [x, y] = id.split(",").map(Number);
+      body += '<rect x="' + x + '" y="' + y + '" width="1.02" height="1.02" fill="' + outline + '"/>';
+    }
   }
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const ch = art[y][x];
+    if (ch !== ".") body += '<rect x="' + x + '" y="' + y + '" width="1.02" height="1.02" fill="' + PAL[ch] + '"/>';
+  }
+  const pad = outline ? 1 : 0;
+  const vb = [-pad, -pad, w + pad * 2, h + pad * 2].join(" ");
+  const scale = pxHeight / (h + pad * 2);
+  return '<svg viewBox="' + vb + '" width="' + ((w + pad * 2) * scale).toFixed(1) + '" height="' + pxHeight.toFixed(1) + '" aria-hidden="true">' + body + "</svg>";
+}
 
-  function braidMaze(w, cols, rows, rnd, ratio) {
-    const ends = [];
-    for (let x = 0; x < cols; x++) for (let y = 0; y < rows; y++) if (openCount(w[x][y]) === 1) ends.push([x, y]);
-    for (let i = ends.length - 1; i > 0; i--) { const j = Math.floor(rnd() * (i + 1)); [ends[i], ends[j]] = [ends[j], ends[i]]; }
-    for (const [x, y] of ends.slice(0, Math.floor(ends.length * ratio))) {
-      if (openCount(w[x][y]) !== 1) continue;
-      const opts = [];
-      for (const k of KEYS) {
-        const nx = x + DIRS[k][0], ny = y + DIRS[k][1];
-        if (w[x][y][k] && nx >= 0 && nx < cols && ny >= 0 && ny < rows) opts.push([k, nx, ny]);
-      }
-      if (!opts.length) continue;
-      opts.sort((a, b) => (openCount(w[a[1]][a[2]]) === 1 ? 0 : 1) - (openCount(w[b[1]][b[2]]) === 1 ? 0 : 1));
-      const pick = rnd() < 0.7 ? opts[0] : opts[Math.floor(rnd() * opts.length)];
-      link(w, x, y, pick[0]);
-    }
+/* the same art drawn inside a maze, in maze units (used for the circle hub) */
+function spriteGroup(name, cx, cy, height) {
+  const art = ART[name], w = art[0].length, h = art.length;
+  const s = height / h, x0 = cx - w * s / 2, y0 = cy - height / 2;
+  let body = "";
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const ch = art[y][x];
+    if (ch === ".") continue;
+    body += '<rect x="' + (x0 + x * s).toFixed(3) + '" y="' + (y0 + y * s).toFixed(3) +
+      '" width="' + (s * 1.05).toFixed(3) + '" height="' + (s * 1.05).toFixed(3) + '" fill="' + PAL[ch] + '"/>';
   }
+  return body;
+}
 
-  function buildMaze(spec, rnd) {
-    const { cols, rows } = spec;
-    const w = newWalls(cols, rows);
-    const size = Math.min(spec.spiral, Math.min(cols, rows) - 4);
-    const region = size >= 3 ? spiralRegion(w, cols, rows, size) : new Set();
-    growingTree(w, cols, rows, rnd, spec.recent, spec.hbias, region);
-    if (region.size) attachRegion(w, cols, rows, region, rnd, 2);
-    if (spec.braid > 0) braidMaze(w, cols, rows, rnd, spec.braid);
-    return w;
-  }
+/* ---------------- themes, shapes, styles, difficulties ---------------- */
+const THEMES = {
+  mineshaft: { label: "Mineshaft", title: "ESCAPE THE MINESHAFT", blurb: "Mines and treasure chests. Can you get Steve through them all?",
+    foot: "These mines twist and loop — watch out for dead ends. Use a pencil!",
+    start: "steve", goal: "chest", mask: "diamond", ink: "#1a1a5e", outline: null },
+  explorer: { label: "Explorer", title: "ESCAPE THE MINESHAFT", blurb: "Mines and treasure chests. Can you get Alex through them all?",
+    foot: "These mines twist and loop — watch out for dead ends. Use a pencil!",
+    start: "alex", goal: "chest", mask: "diamond", ink: "#1a1a5e", outline: null },
+  unicorn: { label: "Unicorn", title: "THE UNICORN MAZE", blurb: "Magic meadows and rainbows. Can you lead the unicorn to each one?",
+    foot: "The meadows twist and loop — watch out for dead ends. Use a pencil!",
+    start: "unicorn", goal: "rainbow", mask: "unicorn", ink: "#7333a0", outline: "#7d4a94" },
+  space: { label: "Space", title: "THE ASTEROID MAZE", blurb: "Steer the rocket through the asteroid field to each star.",
+    foot: "Space twists and loops — watch out for dead ends. Use a pencil!",
+    start: "rocket", goal: "star", mask: "rocket", ink: "#1f3a7a", outline: "#3a4a6b" },
+  dino: { label: "Dino", title: "THE JUNGLE MAZE", blurb: "The dinosaur is looking for her eggs. Can you find the way?",
+    foot: "The jungle twists and loops — watch out for dead ends. Use a pencil!",
+    start: "dino", goal: "egg", mask: "dino", ink: "#1f6b43", outline: "#7a6a46" }
+};
 
-  /* ---------------- solving + difficulty metrics ---------------- */
-  function neighbours(w, cols, rows, x, y) {
-    const out = [];
-    for (const k of KEYS) {
-      if (!w[x][y][k]) {
-        const nx = x + DIRS[k][0], ny = y + DIRS[k][1];
-        if (nx >= 0 && nx < cols && ny >= 0 && ny < rows) out.push([nx, ny]);
-      }
-    }
-    return out;
-  }
-  function solve(w, cols, rows, start, goal) {
-    const prev = new Map([[start.join(","), null]]);
-    const q = [start]; let head = 0;
-    while (head < q.length) {
-      const cur = q[head++];
-      if (cur[0] === goal[0] && cur[1] === goal[1]) break;
-      for (const n of neighbours(w, cols, rows, cur[0], cur[1])) {
-        const id = n.join(",");
-        if (!prev.has(id)) { prev.set(id, cur); q.push(n); }
-      }
-    }
-    const path = []; let cur = goal;
-    while (cur) { path.push(cur); cur = prev.get(cur.join(",")); }
-    return path.reverse();
-  }
-  function analyse(w, cols, rows, start, goal) {
-    const path = solve(w, cols, rows, start, goal);
-    const pset = new Set(path.map(p => p.join(",")));
-    let forks = 0;
-    for (const [x, y] of path) if (openCount(w[x][y]) >= 3) forks++;
-    const compOf = new Map(), seen = new Set();
-    for (let x = 0; x < cols; x++) for (let y = 0; y < rows; y++) {
-      const id = x + "," + y;
-      if (pset.has(id) || seen.has(id)) continue;
-      const comp = [], q = [[x, y]]; seen.add(id); let head = 0;
-      while (head < q.length) {
-        const cur = q[head++];
-        comp.push(cur.join(","));
-        for (const n of neighbours(w, cols, rows, cur[0], cur[1])) {
-          const nid = n.join(",");
-          if (!pset.has(nid) && !seen.has(nid)) { seen.add(nid); q.push(n); }
-        }
-      }
-      for (const cid of comp) compOf.set(cid, comp.length);
-    }
-    let sum = 0, n = 0;
-    for (const [x, y] of path) for (const nb of neighbours(w, cols, rows, x, y)) {
-      const id = nb.join(",");
-      if (!pset.has(id)) { sum += compOf.get(id) || 0; n++; }
-    }
-    let junctions = 0, stubs = 0;
-    for (let x = 0; x < cols; x++) for (let y = 0; y < rows; y++) {
-      const o = openCount(w[x][y]);
-      if (o >= 3) junctions++;
-      if (o === 1) stubs++;
-    }
-    const decoy = n ? sum / n : 0;
-    return { path, len: path.length, forks, decoy, junctions, stubs, score: forks * decoy };
-  }
+const SHAPES = {
+  square: { label: "Square", blurb: "The classic grid. Every strategy below applies to it." },
+  circle: { label: "Circle", blurb: "A theta maze: rings that split as they widen. Start at the top edge and work in to the middle — the goal sits in the hub." },
+  hex: { label: "Hex", blurb: "A sigma maze of hexagons. Six ways out of every cell instead of four, so there is no straight line to follow." },
+  picture: { label: "Picture", blurb: "The maze is cut to the shape of the theme's character — a unicorn head, a rocket, a dinosaur. Enter at the top of the silhouette, leave at the bottom." }
+};
 
-  /* Pick the best of several candidate mazes instead of taking the first one.
-     Without this, a seed can hand you a short, straight-through route. */
-  const CANDIDATES = 22;
-  function bestMaze(spec, baseSeed) {
-    // Off-corner entrance and exit beat "just head for the far corner", but
-    // they must stay far apart or the journey gets shorter, not harder.
-    const rs = mulberry32((baseSeed ^ 0x5bf03635) >>> 0);
-    let sx = 0, gx = spec.cols - 1;
-    if (spec.offset) {
-      sx = Math.round((0.05 + rs() * 0.25) * (spec.cols - 1));
-      gx = Math.round((0.70 + rs() * 0.25) * (spec.cols - 1));
-    }
-    const start = [sx, 0];
-    const goal = [gx, spec.rows - 1];
-    const floor = 1.35 * (spec.cols + spec.rows);   // demand a real journey
-    let best = null, longest = null;
-    for (let k = 0; k < CANDIDATES; k++) {
-      const w = buildMaze(spec, mulberry32((baseSeed + k * 0x9E3779B1) >>> 0));
-      const m = analyse(w, spec.cols, spec.rows, start, goal);
-      const cand = { w, m, start, goal };
-      if (!longest || m.len > longest.m.len) longest = cand;
-      if (m.len >= floor && (!best || m.score > best.m.score)) best = cand;
-    }
-    return best || longest;
-  }
+const DIFFS = {
+  easy:   { label: "Easy",   cellMM: 7.6, braid: 0.20, recent: 0.95, hbias: 1.0, spiral: 0, offset: false },
+  medium: { label: "Medium", cellMM: 6.3, braid: 0.30, recent: 0.85, hbias: 1.6, spiral: 0, offset: false },
+  hard:   { label: "Hard",   cellMM: 5.3, braid: 0.40, recent: 0.80, hbias: 2.0, spiral: 5, offset: true },
+  expert: { label: "Expert", cellMM: 4.4, braid: 0.50, recent: 0.75, hbias: 2.4, spiral: 7, offset: true }
+};
+const LADDER = ["easy", "medium", "hard", "expert"];
 
-  /* ---------------- pixel art ---------------- */
-  const ART = {"steve":["hhhhhhhh","hhhhhhhh","hssssssh","swbssbws","ssssssss","ssmmmmss","sdddddds","ssssssss"],"alex":["rrrrrrrr","rrrrrrrr","rssssssr","rwgssgwr","rssssssr","rssmmssr","rssssssr","rrssssrr"],"unicorn":["........G.......",".......GG.......",".......GG.......","......GGGG......","...uu.PPPP.uu...","..PPPPPPPPPPPP..","..PuuuuuuuuuuP..","..uuuuuuuuuuuu..","..uuEuuuuuuEuu..","..uuuuuuuuuuuu..","...uuuuuuuuuu...","....uuppppuu....",".....uuuuuu.....","......uuuu......"],"rocket":["......R......",".....RRR.....","....RRRRR....","...WWWWWWW...","...WWWWWWW...","...WWbbbWW...","...WWbbbWW...","...WWWWWWW...","...WWWWWWW...",".RRWWWWWWWRR.","RRRWWWWWWWRRR","RR.WWWWWWW.RR","...RRRRRRR...","....fffff....","....fFFFf....",".....fFf.....","......f......"],"dino":["..........DDDD..",".........DDDDDD.",".........DDwDDD.",".........DDDDDD.",".........DDDDD..",".........DDDD...","..D......DDDD...","..DD...DDDDDD...","..DDDDDDDDDDD...","...DDDDDDDDDD...","....DDDDDDDD....","....DDDDDDD.....","....DD..DD......","....DD..DD......","...DDD..DDD....."],"chest":["oooooooooooooooo","oLLLLLLLLLLLLLLo","oLLLLLLLLLLLLLLo","oLLLLLLLMMLLLLLo","ooooooooMMoooooo","oBBBBBBBMMBBBBBo","oBBBBBBBBBBBBBBo","oBBBBBBBBBBBBBBo","oBBBBBBBBBBBBBBo","oBBBBBBBBBBBBBBo","oooooooooooooooo"],"star":["........S........","........S........","........S........",".......SSS.......",".......SSS.......",".......SSS.......",".SSSSSSSSSSSSSSS.","...SSSSSSSSSSS...","....SSSSSSSSS....",".....SSSSSSS.....",".....SSSSSSS.....",".....SSSSSSS.....","....SSSS.SSSS....","....SS.....SS....","....S.......S....",".................","................."],"egg":[".....eee.....","....eeeee....","...eeeeeee...","...eeeeeee...","..eeeeeeeee..","..eetteeeee..","..eeeeeeeee..",".eeeeeeettee.",".eetteeeeeee.",".eeeeeeeeeee.",".eeeetteeeee.","..eeeeeeett..","..eeeeeeeee..","..eeeeeeeee..","...eeeeeee...",".....eee....."],"rainbow":[".................","........1........","....111121111....","...11222322211...","..1223334333221..",".122344454443221.",".123445565544321.","12334566666543321","1234566...6654321","123456.....654321"]};
-  const PAL = {"h":"#3f2a1c","r":"#c76b26","s":"#b48466","w":"#ffffff","b":"#3c44aa","g":"#3f8a48","d":"#6b4a33","m":"#4a2e21","o":"#3a2410","L":"#a0703c","B":"#7a5230","M":"#c8b080","u":"#fcf6ff","P":"#f574b6","p":"#fdb8da","G":"#fac940","e":"#f7f0d9","t":"#a17348","D":"#4c9a52","W":"#e3e9f2","R":"#d8453f","f":"#f08a2c","F":"#fbe06a","S":"#f5c431","1":"#e74c3c","2":"#f39c12","3":"#f7d63d","4":"#55ba68","5":"#4789d7","6":"#9b59b6","E":"#42304d"};
+const STYLES = {
+  classic: { label: "Classic", blurb: "A perfect maze: one route, no loops. Long winding corridors, the way most puzzle books do it.",
+    apply: s => { s.braid = 0; s.spiral = 0; s.hbias = 1; s.recent = 0.95; s.offset = false; } },
+  loops: { label: "Loopy", blurb: "Dead ends are opened into loops. Wall-following and dead-end filling both stop working.",
+    apply: s => { s.spiral = 0; s.hbias = 1; s.braid = Math.max(0.3, s.braid); s.offset = false; } },
+  grain: { label: "Against the grain", blurb: "Passages run across your line of travel, so the maze fights the way you want to go. On a circle that means running round the rings instead of inwards.",
+    apply: s => { s.spiral = 0; s.hbias = Math.max(2.2, s.hbias * 1.4); s.offset = true; } },
+  spiral: { label: "Spiral trap", blurb: "A spiral sits in the middle. You can't tell by eye which side a passage comes out of. Square grids only.",
+    apply: s => { s.spiral = Math.max(5, s.spiral); s.braid = Math.max(0.25, s.braid); s.offset = true; } },
+  everything: { label: "The lot", blurb: "Loops, a grain across your path, a spiral trap and an entrance away from the corner. Hardest of the five.",
+    apply: s => { s.spiral = Math.max(5, s.spiral); s.braid = Math.max(0.4, s.braid); s.hbias = Math.max(2, s.hbias); s.offset = true; } }
+};
 
-  function spriteSVG(name, pxHeight, outline) {
-    const art = ART[name];
-    const w = art[0].length, h = art.length;
-    const filled = new Set();
-    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (art[y][x] !== ".") filled.add(x + "," + y);
-    let body = "";
-    if (outline) {
-      const edge = new Set();
-      for (const id of filled) {
-        const [x, y] = id.split(",").map(Number);
-        for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) {
-          const nid = (x + dx) + "," + (y + dy);
-          if (!filled.has(nid)) edge.add(nid);
-        }
-      }
-      for (const id of edge) {
-        const [x, y] = id.split(",").map(Number);
-        body += '<rect x="' + x + '" y="' + y + '" width="1.02" height="1.02" fill="' + outline + '"/>';
-      }
-    }
-    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
-      const ch = art[y][x];
-      if (ch === ".") continue;
-      body += '<rect x="' + x + '" y="' + y + '" width="1.02" height="1.02" fill="' + PAL[ch] + '"/>';
-    }
-    const pad = outline ? 1 : 0;
-    const vb = [-pad, -pad, w + pad * 2, h + pad * 2].join(" ");
-    const scale = pxHeight / (h + pad * 2);
-    return '<svg viewBox="' + vb + '" width="' + ((w + pad * 2) * scale).toFixed(1) + '" height="' + pxHeight.toFixed(1) + '" aria-hidden="true">' + body + "</svg>";
-  }
+const PAPERS = { a4: { w: 210, h: 297 }, letter: { w: 216, h: 279 } };
 
-  /* ---------------- themes, styles, difficulties ---------------- */
-  const THEMES = {
-    mineshaft: { label: "Mineshaft", title: "ESCAPE THE MINESHAFT", blurb: "Mines and treasure chests. Can you get Steve through them all?",
-      foot: "These mines twist and loop — watch out for dead ends. Use a pencil!", start: "steve", goal: "chest", ink: "#1a1a5e", outline: null },
-    explorer: { label: "Explorer", title: "ESCAPE THE MINESHAFT", blurb: "Mines and treasure chests. Can you get Alex through them all?",
-      foot: "These mines twist and loop — watch out for dead ends. Use a pencil!", start: "alex", goal: "chest", ink: "#1a1a5e", outline: null },
-    unicorn: { label: "Unicorn", title: "THE UNICORN MAZE", blurb: "Magic meadows and rainbows. Can you lead the unicorn to each one?",
-      foot: "The meadows twist and loop — watch out for dead ends. Use a pencil!", start: "unicorn", goal: "rainbow", ink: "#7333a0", outline: "#7d4a94" },
-    space: { label: "Space", title: "THE ASTEROID MAZE", blurb: "Steer the rocket through the asteroid field to each star.",
-      foot: "Space twists and loops — watch out for dead ends. Use a pencil!", start: "rocket", goal: "star", ink: "#1f3a7a", outline: "#3a4a6b" },
-    dino: { label: "Dino", title: "THE JUNGLE MAZE", blurb: "The dinosaur is looking for her eggs. Can you find the way?",
-      foot: "The jungle twists and loops — watch out for dead ends. Use a pencil!", start: "dino", goal: "egg", ink: "#1f6b43", outline: "#7a6a46" }
+function hashSeed(str) {
+  let h = 2166136261 >>> 0;
+  for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 16777619) >>> 0; }
+  return h >>> 0;
+}
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
+}
 
-  /* cellMM is the printed cell size this difficulty aims for: the smaller the
-     cell, the more of them fit, so the maze gets bigger as well as denser. */
-  const DIFFS = {
-    easy:   { label: "Easy",   cellMM: 7.6, braid: 0.20, recent: 0.95, hbias: 1.0, spiral: 0, offset: false },
-    medium: { label: "Medium", cellMM: 6.3, braid: 0.30, recent: 0.85, hbias: 1.6, spiral: 0, offset: false },
-    hard:   { label: "Hard",   cellMM: 5.3, braid: 0.40, recent: 0.80, hbias: 2.0, spiral: 5, offset: true },
-    expert: { label: "Expert", cellMM: 4.4, braid: 0.50, recent: 0.75, hbias: 2.4, spiral: 7, offset: true }
-  };
-  const LADDER = ["easy", "medium", "hard", "expert"];
-
-  const STYLES = {
-    classic: { label: "Classic", blurb: "A perfect maze: one route, no loops. Long winding corridors, the way most puzzle books do it.",
-      apply: s => { s.braid = 0; s.spiral = 0; s.hbias = 1; s.recent = 0.95; s.offset = false; } },
-    loops: { label: "Loopy", blurb: "Dead ends are opened into loops. Wall-following and dead-end filling both stop working.",
-      apply: s => { s.spiral = 0; s.hbias = 1; s.braid = Math.max(0.3, s.braid); s.offset = false; } },
-    grain: { label: "Against the grain", blurb: "Passages run sideways while you need to travel down, so the maze fights your line of travel.",
-      apply: s => { s.spiral = 0; s.hbias = Math.max(2.2, s.hbias * 1.4); s.offset = true; } },
-    spiral: { label: "Spiral trap", blurb: "A spiral sits in the middle. You can't tell by eye which side a passage comes out of.",
-      apply: s => { s.spiral = Math.max(5, s.spiral); s.braid = Math.max(0.25, s.braid); s.offset = true; } },
-    everything: { label: "The lot", blurb: "Loops, sideways grain, a spiral trap and an exit away from the corner. Hardest of the five.",
-      apply: s => { s.spiral = Math.max(5, s.spiral); s.braid = Math.max(0.4, s.braid); s.hbias = Math.max(2, s.hbias); s.offset = true; } }
-  };
-
-  const PAPERS = { a4: { w: 210, h: 297 }, letter: { w: 216, h: 279 } };
-
-  /* ---------------- state ---------------- */
-  const state = {
-    theme: "unicorn", styles: ["everything"], diff: "ladder", count: 4,
-    seed: "meadow-7", paper: "a4", solution: false
-  };
-
-  /* ---------------- controls ---------------- */
-  function radioChips(host, items, name, get, set) {
-    host.innerHTML = "";
-    for (const it of items) {
-      const lab = document.createElement("label");
-      lab.className = "chip" + (items.length > 5 ? " wide" : "");
-      lab.innerHTML = '<input type="radio" name="' + name + '" value="' + it.value + '"' + (get() === it.value ? " checked" : "") + '><span>' + it.label + "</span>";
-      lab.querySelector("input").addEventListener("change", e => { set(e.target.value); render(); });
-      host.appendChild(lab);
-    }
+/* ---------------- spec + candidate search ---------------- */
+function specFor(diffKey, styleKey, shape, boxW, boxH) {
+  const d = DIFFS[diffKey];
+  const s = { braid: d.braid, recent: d.recent, hbias: d.hbias, spiral: d.spiral, offset: d.offset, cellMM: d.cellMM };
+  STYLES[styleKey].apply(s);
+  if (shape !== "square") s.spiral = 0;           // the spiral trap is a square-grid trick
+  const c = Math.max(7, Math.min(40, Math.round(boxW / s.cellMM)));
+  const r = Math.max(6, Math.min(46, Math.round(boxH / s.cellMM)));
+  s.cols = c; s.rows = r;
+  s.rings = Math.max(4, Math.min(15, Math.round(Math.min(boxW, boxH) / 2 / s.cellMM)));
+  if (shape === "hex") {
+    s.cols = Math.max(5, Math.min(32, Math.round(boxW / s.cellMM)));
+    s.rows = Math.max(5, Math.min(40, Math.round(boxH / (s.cellMM * 0.87))));
   }
-  function checkChips(host, items, name, has, toggle) {
-    host.innerHTML = "";
-    for (const it of items) {
-      const lab = document.createElement("label");
-      lab.className = "chip wide";
-      lab.innerHTML = '<input type="checkbox" name="' + name + '" value="' + it.value + '"' + (has(it.value) ? " checked" : "") + '><span>' + it.label + "</span>";
-      lab.querySelector("input").addEventListener("change", e => { toggle(e.target.value, e.target.checked, e.target); render(); });
-      host.appendChild(lab);
-    }
+  return s;
+}
+
+function makeGrid(shape, spec, rnd, theme) {
+  if (shape === "circle") return circleGrid(spec);
+  if (shape === "hex") return hexGrid(spec);
+  if (shape === "picture") return pictureGrid(spec, ART[theme.mask]);
+  return squareGrid(spec, rnd);
+}
+
+const CANDIDATES = 16;
+function bestMaze(shape, spec, theme, baseSeed) {
+  let best = null, longest = null;
+  for (let k = 0; k < CANDIDATES; k++) {
+    const rnd = mulberry32((baseSeed + k * 0x9E3779B1) >>> 0);
+    const g = makeGrid(shape, spec, rnd, theme);
+    const open = carve(g, rnd, spec.recent, g.blocked);
+    if (g.blocked.size) attach(g, open, rnd, 2);
+    braid(g, open, rnd, spec.braid);
+    const m = score(g, open);
+    if (!m) continue;
+    const span = shape === "circle" ? spec.rings * 2 : (spec.cols + spec.rows);
+    const cand = { g: g, open: open, m: m };
+    if (!longest || m.len > longest.m.len) longest = cand;
+    if (m.len >= 1.25 * span && (!best || m.value > best.m.value)) best = cand;
   }
+  return best || longest;
+}
 
-  radioChips(document.getElementById("themeChips"),
-    Object.keys(THEMES).map(k => ({ value: k, label: THEMES[k].label })),
-    "theme", () => state.theme, v => state.theme = v);
+/* ---------------- drawing ---------------- */
+function arrowPath(e, lw, col) {
+  const L = Math.hypot(e.dx, e.dy) || 1, ux = e.dx / L, uy = e.dy / L;
+  const sc = lw * 7;
+  const tipX = e.x + ux * sc * 0.15, tipY = e.y + uy * sc * 0.15;
+  const tailX = e.x - ux * sc, tailY = e.y - uy * sc;
+  const bx = e.x - ux * sc * 0.35, by = e.y - uy * sc * 0.35;
+  const px = -uy * sc * 0.35, py = ux * sc * 0.35;
+  return '<path d="M' + tailX.toFixed(2) + " " + tailY.toFixed(2) + "L" + tipX.toFixed(2) + " " + tipY.toFixed(2) +
+    "M" + (bx + px).toFixed(2) + " " + (by + py).toFixed(2) + "L" + tipX.toFixed(2) + " " + tipY.toFixed(2) +
+    "L" + (bx - px).toFixed(2) + " " + (by - py).toFixed(2) +
+    '" fill="none" stroke="' + col + '" stroke-width="' + (lw * 1.2).toFixed(3) +
+    '" stroke-linecap="round" stroke-linejoin="round"/>';
+}
 
-  checkChips(document.getElementById("styleChips"),
-    Object.keys(STYLES).map(k => ({ value: k, label: STYLES[k].label })),
-    "style", v => state.styles.includes(v),
-    (v, on, el) => {
-      if (on) { if (!state.styles.includes(v)) state.styles.push(v); }
-      else if (state.styles.length > 1) state.styles = state.styles.filter(s => s !== v);
-      else el.checked = true;                       // never leave zero selected
-      state.styles.sort((a, b) => Object.keys(STYLES).indexOf(a) - Object.keys(STYLES).indexOf(b));
-    });
+function mazeSVG(g, open, m, theme, showSolution) {
+  const vb = g.viewBox;
+  const span = Math.max(vb[2], vb[3]);
+  const lw = Math.max(0.07, Math.min(0.17, 2.4 / span));
+  let walls = "";
+  for (const [k, d] of g.seg) if (!open.has(k)) walls += d;
+  let out = "";
+  if (showSolution && m) {
+    let d = "M" + (g.entry.x - g.entry.dx * 0.5).toFixed(2) + " " + (g.entry.y - g.entry.dy * 0.5).toFixed(2);
+    for (const c of m.path) d += "L" + g.cx[c].toFixed(2) + " " + g.cy[c].toFixed(2);
+    if (g.exit) d += "L" + (g.exit.x - g.exit.dx * 0.5).toFixed(2) + " " + (g.exit.y - g.exit.dy * 0.5).toFixed(2);
+    out += '<path d="' + d + '" fill="none" stroke="#f08a2c" stroke-width="' + (lw * 2.6).toFixed(3) +
+      '" stroke-linejoin="round" stroke-linecap="round" opacity=".85"/>';
+  }
+  out += '<path d="' + walls + g.borderPath + '" fill="none" stroke="' + theme.ink +
+    '" stroke-width="' + lw.toFixed(3) + '" stroke-linecap="round" stroke-linejoin="round"/>';
+  out += arrowPath(g.entry, lw, "#0f8a46");
+  if (g.exit) out += arrowPath(g.exit, lw, "#d93a3a");
+  if (g.goalInside) out += spriteGroup(theme.goal, g.cx[g.goal], g.cy[g.goal], 1.8);
+  const pad = span * 0.035 + lw;
+  const box = [vb[0] - pad, vb[1] - pad, vb[2] + pad * 2, vb[3] + pad * 2].map(v => +v.toFixed(2)).join(" ");
+  return '<svg class="maze" viewBox="' + box + '" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Maze puzzle">' + out + "</svg>";
+}
 
-  radioChips(document.getElementById("diffChips"),
-    Object.keys(DIFFS).map(k => ({ value: k, label: DIFFS[k].label }))
-      .concat([{ value: "ladder", label: "Ladder" }]),
-    "diff", () => state.diff, v => state.diff = v);
+/* ---------------- state ---------------- */
+const state = {
+  theme: "unicorn", shape: "square", styles: ["everything"], diff: "ladder",
+  count: 4, seed: "meadow-7", paper: "a4", solution: false
+};
 
-  radioChips(document.getElementById("countChips"),
-    [1, 2, 3, 4, 5, 6, 7, 8].map(n => ({ value: String(n), label: String(n) })),
-    "count", () => String(state.count), v => state.count = Number(v));
+/* ---------------- controls ---------------- */
+function radioChips(host, items, name, get, set) {
+  host.innerHTML = "";
+  for (const it of items) {
+    const lab = document.createElement("label");
+    lab.className = "chip" + (items.length > 5 ? " wide" : "");
+    lab.innerHTML = '<input type="radio" name="' + name + '" value="' + it.value + '"' + (get() === it.value ? " checked" : "") + '><span>' + it.label + "</span>";
+    lab.querySelector("input").addEventListener("change", e => { set(e.target.value); render(); });
+    host.appendChild(lab);
+  }
+}
+function checkChips(host, items, name, has, toggle) {
+  host.innerHTML = "";
+  for (const it of items) {
+    const lab = document.createElement("label");
+    lab.className = "chip wide";
+    lab.innerHTML = '<input type="checkbox" name="' + name + '" value="' + it.value + '"' + (has(it.value) ? " checked" : "") + '><span>' + it.label + "</span>";
+    lab.querySelector("input").addEventListener("change", e => { toggle(e.target.value, e.target.checked, e.target); render(); });
+    host.appendChild(lab);
+  }
+}
 
-  const seedInput = document.getElementById("seed");
-  seedInput.addEventListener("input", () => { state.seed = seedInput.value; render(); });
+radioChips(document.getElementById("themeChips"),
+  Object.keys(THEMES).map(k => ({ value: k, label: THEMES[k].label })),
+  "theme", () => state.theme, v => state.theme = v);
 
-  const WORDS = ["meadow", "comet", "burrow", "lantern", "thicket", "cobble", "glimmer", "ridge", "marble", "willow", "pebble", "cavern"];
-  document.getElementById("shuffle").addEventListener("click", () => {
-    state.seed = WORDS[Math.floor(Math.random() * WORDS.length)] + "-" + (1 + Math.floor(Math.random() * 999));
-    seedInput.value = state.seed;
-    render();
+radioChips(document.getElementById("shapeChips"),
+  Object.keys(SHAPES).map(k => ({ value: k, label: SHAPES[k].label })),
+  "shape", () => state.shape, v => state.shape = v);
+
+checkChips(document.getElementById("styleChips"),
+  Object.keys(STYLES).map(k => ({ value: k, label: STYLES[k].label })),
+  "style", v => state.styles.includes(v),
+  (v, on, el) => {
+    if (on) { if (!state.styles.includes(v)) state.styles.push(v); }
+    else if (state.styles.length > 1) state.styles = state.styles.filter(s => s !== v);
+    else el.checked = true;
+    state.styles.sort((a, b) => Object.keys(STYLES).indexOf(a) - Object.keys(STYLES).indexOf(b));
   });
 
-  const paperSel = document.getElementById("paper");
-  paperSel.addEventListener("change", e => { state.paper = e.target.value; render(); });
-  document.getElementById("solution").addEventListener("change", e => { state.solution = e.target.checked; render(); });
+radioChips(document.getElementById("diffChips"),
+  Object.keys(DIFFS).map(k => ({ value: k, label: DIFFS[k].label })).concat([{ value: "ladder", label: "Ladder" }]),
+  "diff", () => state.diff, v => state.diff = v);
 
-  function printPopup() {
-    const css = Array.from(document.querySelectorAll("style")).map(n => n.textContent).join("\n");
-    const sheetHTML = document.getElementById("sheet").outerHTML;
-    let win = null;
-    try { win = window.open("", "_blank"); } catch (e) { win = null; }
-    if (!win) return false;
-    win.document.open();
-    win.document.write(
-      '<!doctype html><html><head><meta charset="utf-8"><title>Maze sheet</title>' +
-      '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fredoka:wght@500;600;700&family=Nunito+Sans:ital,opsz,wght@0,6..12,400;0,6..12,600;0,6..12,700&display=swap">' +
-      "<style>" + css + "</style>" +
-      "<style>html,body{margin:0;background:#fff}" +
-      ".sheet{box-shadow:none;margin:0;padding:0;min-height:0!important}" +
-      "header.top,.rail,.stats,.no-print{display:none!important}.wrap{padding:0;max-width:none}</style>" +
-      "</head><body>" + sheetHTML + "</body></html>"
-    );
-    win.document.close();
-    try { win.focus(); } catch (e) { /* ignore */ }
-    setTimeout(() => { try { win.print(); } catch (e) { /* ignore */ } }, 500);
-    return true;
-  }
+radioChips(document.getElementById("countChips"),
+  [1, 2, 3, 4, 5, 6, 7, 8].map(n => ({ value: String(n), label: String(n) })),
+  "count", () => String(state.count), v => state.count = Number(v));
 
-  document.getElementById("printBtn").addEventListener("click", () => {
-    const fb = document.getElementById("printFallback");
-    fb.hidden = true;
-    if (state.paper !== "a4") { state.paper = "a4"; paperSel.value = "a4"; render(); }
-    let fired = false;
-    const mark = () => { fired = true; };
-    window.addEventListener("beforeprint", mark, { once: true });
-    try { window.print(); } catch (e) { /* blocked in the viewer frame */ }
-    setTimeout(() => {
-      window.removeEventListener("beforeprint", mark);
-      if (!fired) fb.hidden = false;               // nothing worked: say so
-    }, 400);
-  });
+const seedInput = document.getElementById("seed");
+seedInput.addEventListener("input", () => { state.seed = seedInput.value; render(); });
 
-  /* ---------------- layout maths ---------------- */
-  function gridShape(count) {
-    if (count === 1) return [1, 1];
-    if (count === 2) return [1, 2];
-    if (count === 3) return [1, 3];
-    return [2, Math.ceil(count / 2)];
-  }
-
-  function specFor(diffKey, styleKey, boxW, boxH) {
-    const d = DIFFS[diffKey];
-    const s = { braid: d.braid, recent: d.recent, hbias: d.hbias, spiral: d.spiral, offset: d.offset, cellMM: d.cellMM };
-    STYLES[styleKey].apply(s);
-    s.cols = Math.max(7, Math.min(40, Math.round(boxW / s.cellMM)));
-    s.rows = Math.max(6, Math.min(46, Math.round(boxH / s.cellMM)));
-    return s;
-  }
-
-  /* ---------------- drawing ---------------- */
-  function mazeSVG(w, spec, start, goal, ink, path) {
-    const { cols, rows } = spec;
-    const seg = [];
-    for (let x = 0; x < cols; x++) for (let y = 0; y < rows; y++) {
-      const c = w[x][y];
-      if (c.N) seg.push("M" + x + " " + y + "h1");
-      if (c.W) seg.push("M" + x + " " + y + "v1");
-      if (y === rows - 1 && c.S) seg.push("M" + x + " " + (y + 1) + "h1");
-      if (x === cols - 1 && c.E) seg.push("M" + (x + 1) + " " + y + "v1");
-    }
-    const lw = Math.max(0.1, Math.min(0.17, 2.4 / Math.max(cols, rows)));
-    let out = "";
-    if (path) {
-      let d = "M" + (start[0] + 0.5) + " 0";
-      for (const [x, y] of path) d += "L" + (x + 0.5) + " " + (y + 0.5);
-      d += "L" + (goal[0] + 0.5) + " " + rows;
-      out += '<path d="' + d + '" fill="none" stroke="#f08a2c" stroke-width="' + (lw * 2.6).toFixed(3) + '" stroke-linejoin="round" stroke-linecap="round" opacity=".85"/>';
-    }
-    out += '<path d="' + seg.join("") + '" fill="none" stroke="' + ink + '" stroke-width="' + lw.toFixed(3) + '" stroke-linecap="round"/>';
-    out += '<path d="M' + (start[0] + 0.06) + " 0h0.88M" + (goal[0] + 0.06) + " " + rows + 'h0.88" stroke="#ffffff" stroke-width="' + (lw * 1.9).toFixed(3) + '" fill="none"/>';
-    const ax = start[0] + 0.5, bx = goal[0] + 0.5;
-    out += '<path d="M' + ax + " -0.62V-0.08M" + (ax - 0.22) + " -0.3L" + ax + " -0.05L" + (ax + 0.22) + ' -0.3" fill="none" stroke="#0f8a46" stroke-width="' + (lw * 1.1).toFixed(3) + '" stroke-linecap="round" stroke-linejoin="round"/>';
-    out += '<path d="M' + bx + " " + (rows + 0.08) + "V" + (rows + 0.62) + "M" + (bx - 0.22) + " " + (rows + 0.34) + "L" + bx + " " + (rows + 0.6) + "L" + (bx + 0.22) + " " + (rows + 0.34) + '" fill="none" stroke="#d93a3a" stroke-width="' + (lw * 1.1).toFixed(3) + '" stroke-linecap="round" stroke-linejoin="round"/>';
-    const vb = [-lw, -0.75, cols + lw * 2, rows + 1.5].join(" ");
-    return '<svg class="maze" viewBox="' + vb + '" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Maze puzzle">' + out + "</svg>";
-  }
-
-  /* ---------------- keep the sheet to exactly one page ---------------- */
-  function fitToPage(grows, paperHmm) {
-    const sheet = document.getElementById("sheet");
-    // The printable height is the page minus its 12mm margins. Measure the
-    // CONTENT, not the sheet box: min-height pins that to a page either way,
-    // which is what hid a 1-3px overflow and pushed printing onto page two.
-    const availH = (paperHmm - 24) / 25.4 * 96 - 2;   // 2px safety
-    const contentHeight = () => {
-      const first = sheet.firstElementChild, last = sheet.lastElementChild;
-      if (!first || !last) return 0;
-      return last.getBoundingClientRect().bottom - first.getBoundingClientRect().top;
-    };
-    const pass = () => {
-      for (let i = 0; i < 6; i++) {
-        const over = contentHeight() - availH;
-        if (over <= 0) return;
-        const shrink = over / grows + 0.4;
-        const boxes = sheet.querySelectorAll(".mazewrap");
-        if (!boxes.length) return;
-        boxes.forEach(el => {
-          const h = el.getBoundingClientRect().height;
-          el.style.height = Math.max(40, h - shrink) + "px";
-        });
-      }
-    };
-    // wait for the webfonts, or the heading measures short and the trim is wrong
-    if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => requestAnimationFrame(pass));
-    else requestAnimationFrame(pass);
-    pass();
-  }
-
-  /* ---------------- render ---------------- */
-  function render() {
-    const theme = THEMES[state.theme];
-    const paper = PAPERS[state.paper];
-    const [gcols, grows] = gridShape(state.count);
-
-    document.getElementById("diffBlurb").textContent =
-      state.diff === "ladder"
-        ? "Mazes get harder down the page, from Easy to Expert."
-        : "Every maze on the page is " + DIFFS[state.diff].label + ": " +
-          "cells about " + DIFFS[state.diff].cellMM + "mm, so a smaller cell means a bigger, denser maze.";
-
-    document.getElementById("styleBlurb").textContent =
-      state.styles.length === 1 ? STYLES[state.styles[0]].blurb
-        : "The " + state.styles.length + " selected styles are dealt out across the mazes, one per maze.";
-
-    const sheet = document.getElementById("sheet");
-    sheet.style.width = paper.w + "mm";
-    sheet.style.minHeight = paper.h + "mm";
-
-    const spriteH = state.count >= 7 ? 20 : state.count >= 5 ? 24 : state.count >= 3 ? 28 : 34;
-    const goalH = spriteH;
-
-    // Everything below is measured against the real printable area, so the
-    // sheet is exactly one page: 12mm margins all round, minus the sheet's
-    // own heading and footer, minus each card's label and its sprite bands.
-    const HEAD_MM = 16, FOOT_MM = 7, LABEL_MM = 5.2, GAP_MM = 6, SAFETY_MM = 1;
-    const bandsMM = (spriteH + goalH) * 0.2646;
-    const contentW = paper.w - 24, contentH = paper.h - 24;
-    const boxW = (contentW - (gcols - 1) * GAP_MM) / gcols;
-    const perCard = (contentH - HEAD_MM - FOOT_MM - (grows - 1) * GAP_MM) / grows;
-    const boxH = Math.max(18, perCard - LABEL_MM - bandsMM - SAFETY_MM);
-
-    const base = hashSeed(state.seed);
-    const cards = [], stats = [];
-
-    for (let i = 0; i < state.count; i++) {
-      const diffKey = state.diff === "ladder"
-        ? LADDER[Math.min(LADDER.length - 1, Math.floor(i * LADDER.length / state.count))]
-        : state.diff;
-      const styleKey = state.styles[i % state.styles.length];
-      const spec = specFor(diffKey, styleKey, boxW, boxH);
-      const { w, m, start, goal } = bestMaze(spec, (base + i * 0x45D9F3B) >>> 0);
-
-      const svg = mazeSVG(w, spec, start, goal, theme.ink, state.solution ? m.path : null);
-      const startLeft = ((start[0] + 0.5) / spec.cols * 100).toFixed(2);
-      const goalLeft = ((goal[0] + 0.5) / spec.cols * 100).toFixed(2);
-
-      cards.push(
-        '<div class="card">' +
-          '<div class="card-head">' +
-            '<span class="num" style="color:' + theme.ink + '">Maze ' + (i + 1) + "</span>" +
-            '<span class="lvl">' + DIFFS[diffKey].label + " · " + STYLES[styleKey].label + "</span>" +
-          "</div>" +
-          '<div class="band top" style="height:' + spriteH + 'px">' +
-            '<div class="sprite" style="left:' + startLeft + '%">' + spriteSVG(theme.start, spriteH, theme.outline) + "</div>" +
-          "</div>" +
-          '<div class="mazewrap" style="height:' + boxH.toFixed(2) + 'mm">' + svg + "</div>" +
-          '<div class="band bottom" style="height:' + goalH + 'px">' +
-            '<div class="sprite" style="left:' + goalLeft + '%">' + spriteSVG(theme.goal, goalH, null) + "</div>" +
-          "</div>" +
-        "</div>"
-      );
-
-      stats.push(
-        '<div class="stat"><b>Maze ' + (i + 1) + " · " + DIFFS[diffKey].label + " · " + STYLES[styleKey].label + "</b>" +
-        '<span class="nums">' + spec.cols + "×" + spec.rows + " · route " + m.len + " cells · " + m.forks +
-        " forks on route · wrong turn costs " + m.decoy.toFixed(0) + " cells · " + m.junctions + " junctions</span></div>"
-      );
-    }
-
-    sheet.innerHTML =
-      '<div class="sheet-head"><h2 style="color:' + theme.ink + '">' + theme.title + "</h2><p>" + theme.blurb + "</p></div>" +
-      '<div class="grid" style="grid-template-columns:repeat(' + gcols + ',minmax(0,1fr))">' + cards.join("") + "</div>" +
-      '<div class="sheet-foot">' + theme.foot + "</div>";
-
-    document.getElementById("stats").innerHTML =
-      '<div class="stat" style="grid-column:1/-1"><b>How hard is this sheet?</b><span class="nums">' +
-      'Each maze is the best of ' + CANDIDATES + ' candidates, scored on forks along the route times how far a wrong turn ' +
-      'carries you before it is provably wrong. Candidates whose route is too short are rejected outright. Not printed.</span></div>' +
-      stats.join("");
-
-    // The estimates above get it close; this measures what the browser actually
-    // laid out and trims the maze boxes until the sheet is exactly one page.
-    fitToPage(grows, paper.h);
-
-    let pageStyle = document.getElementById("pageRule");
-    if (!pageStyle) { pageStyle = document.createElement("style"); pageStyle.id = "pageRule"; document.head.appendChild(pageStyle); }
-    pageStyle.textContent =
-      "@page { size: " + (state.paper === "a4" ? "A4" : "letter") + " portrait; margin: 12mm; }" +
-      "@media print { .sheet { width: " + (paper.w - 24) + "mm !important; } }";
-  }
-
+const WORDS = ["meadow", "comet", "burrow", "lantern", "thicket", "cobble", "glimmer", "ridge", "marble", "willow", "pebble", "cavern"];
+document.getElementById("shuffle").addEventListener("click", () => {
+  state.seed = WORDS[Math.floor(Math.random() * WORDS.length)] + "-" + (1 + Math.floor(Math.random() * 999));
+  seedInput.value = state.seed;
   render();
+});
+
+const paperSel = document.getElementById("paper");
+paperSel.addEventListener("change", e => { state.paper = e.target.value; render(); });
+document.getElementById("solution").addEventListener("change", e => { state.solution = e.target.checked; render(); });
+
+document.getElementById("printBtn").addEventListener("click", () => {
+  const fb = document.getElementById("printFallback");
+  fb.hidden = true;
+  if (state.paper !== "a4") { state.paper = "a4"; paperSel.value = "a4"; render(); }
+  let fired = false;
+  const mark = () => { fired = true; };
+  window.addEventListener("beforeprint", mark, { once: true });
+  try { window.print(); } catch (e) { /* blocked */ }
+  setTimeout(() => {
+    window.removeEventListener("beforeprint", mark);
+    if (!fired) fb.hidden = false;
+  }, 400);
+});
+
+/* ---------------- layout ---------------- */
+function gridShape(count) {
+  if (count === 1) return [1, 1];
+  if (count === 2) return [1, 2];
+  if (count === 3) return [1, 3];
+  return [2, Math.ceil(count / 2)];
+}
+
+function fitToPage(grows, paperHmm) {
+  const sheet = document.getElementById("sheet");
+  const availH = (paperHmm - 24) / 25.4 * 96 - 2;
+  const contentHeight = () => {
+    const first = sheet.firstElementChild, last = sheet.lastElementChild;
+    if (!first || !last) return 0;
+    return last.getBoundingClientRect().bottom - first.getBoundingClientRect().top;
+  };
+  const pass = () => {
+    for (let i = 0; i < 6; i++) {
+      const over = contentHeight() - availH;
+      if (over <= 0) return;
+      const shrink = over / grows + 0.4;
+      const boxes = sheet.querySelectorAll(".mazewrap");
+      if (!boxes.length) return;
+      boxes.forEach(el => {
+        const h = el.getBoundingClientRect().height;
+        el.style.height = Math.max(40, h - shrink) + "px";
+      });
+    }
+  };
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => requestAnimationFrame(pass));
+  else requestAnimationFrame(pass);
+  pass();
+}
+
+/* ---------------- render ---------------- */
+function render() {
+  const theme = THEMES[state.theme];
+  const paper = PAPERS[state.paper];
+  const shape = state.shape;
+  const [gcols, grows] = gridShape(state.count);
+
+  document.getElementById("shapeBlurb").textContent = SHAPES[shape].blurb;
+  document.getElementById("diffBlurb").textContent =
+    state.diff === "ladder"
+      ? "Mazes get harder down the page, from Easy to Expert."
+      : "Every maze is " + DIFFS[state.diff].label + ": cells about " + DIFFS[state.diff].cellMM +
+        "mm, so a smaller cell means a bigger, denser maze.";
+  const spiralOnly = shape !== "square" && state.styles.includes("spiral");
+  document.getElementById("styleBlurb").textContent =
+    (state.styles.length === 1 ? STYLES[state.styles[0]].blurb
+      : "The " + state.styles.length + " selected styles are dealt out across the mazes, one per maze.") +
+    (spiralOnly ? " The spiral trap needs a square grid, so it is skipped on this shape." : "");
+
+  const sheet = document.getElementById("sheet");
+  sheet.style.width = paper.w + "mm";
+  sheet.style.minHeight = paper.h + "mm";
+
+  const spriteH = state.count >= 7 ? 20 : state.count >= 5 ? 24 : state.count >= 3 ? 28 : 34;
+  const goalH = spriteH;
+  const HEAD_MM = 16, FOOT_MM = 7, LABEL_MM = 5.2, GAP_MM = 6, SAFETY_MM = 1;
+  const bandsMM = (spriteH + (shape === "circle" ? 0 : goalH)) * 0.2646;
+  const contentW = paper.w - 24, contentH = paper.h - 24;
+  const boxW = (contentW - (gcols - 1) * GAP_MM) / gcols;
+  const perCard = (contentH - HEAD_MM - FOOT_MM - (grows - 1) * GAP_MM) / grows;
+  const boxH = Math.max(18, perCard - LABEL_MM - bandsMM - SAFETY_MM);
+
+  const base = hashSeed(state.seed + "|" + shape);
+  const cards = [], stats = [];
+
+  for (let i = 0; i < state.count; i++) {
+    const diffKey = state.diff === "ladder"
+      ? LADDER[Math.min(LADDER.length - 1, Math.floor(i * LADDER.length / state.count))]
+      : state.diff;
+    const styleKey = state.styles[i % state.styles.length];
+    const spec = specFor(diffKey, styleKey, shape, boxW, boxH);
+    const { g, open, m } = bestMaze(shape, spec, theme, (base + i * 0x45D9F3B) >>> 0);
+
+    const svg = mazeSVG(g, open, m, theme, state.solution);
+    const vb = g.viewBox, pad = Math.max(vb[2], vb[3]) * 0.035;
+    const pct = p => (((p - vb[0] + pad) / (vb[2] + pad * 2)) * 100).toFixed(2);
+
+    cards.push(
+      '<div class="card">' +
+        '<div class="card-head">' +
+          '<span class="num" style="color:' + theme.ink + '">Maze ' + (i + 1) + "</span>" +
+          '<span class="lvl">' + DIFFS[diffKey].label + " · " + STYLES[styleKey].label + "</span>" +
+        "</div>" +
+        '<div class="band top" style="height:' + spriteH + 'px">' +
+          '<div class="sprite" style="left:' + pct(g.entry.x) + '%">' + spriteSVG(theme.start, spriteH, theme.outline) + "</div>" +
+        "</div>" +
+        '<div class="mazewrap" style="height:' + boxH.toFixed(2) + 'mm">' + svg + "</div>" +
+        (g.exit
+          ? '<div class="band bottom" style="height:' + goalH + 'px">' +
+            '<div class="sprite" style="left:' + pct(g.exit.x) + '%">' + spriteSVG(theme.goal, goalH, null) + "</div></div>"
+          : "") +
+      "</div>"
+    );
+
+    const size = shape === "circle" ? spec.rings + " rings" : g.n + " cells";
+    stats.push(
+      '<div class="stat"><b>Maze ' + (i + 1) + " · " + DIFFS[diffKey].label + " · " + STYLES[styleKey].label + "</b>" +
+      '<span class="nums">' + size + " · route " + m.len + " · " + m.forks + " forks (" + m.backForks +
+      " near the exit) · wrong turn costs " + m.decoy.toFixed(0) + " cells · " + m.junctions + " junctions</span></div>"
+    );
+  }
+
+  sheet.innerHTML =
+    '<div class="sheet-head"><h2 style="color:' + theme.ink + '">' + theme.title + "</h2><p>" + theme.blurb + "</p></div>" +
+    '<div class="grid" style="grid-template-columns:repeat(' + gcols + ',minmax(0,1fr))">' + cards.join("") + "</div>" +
+    '<div class="sheet-foot">' + theme.foot + "</div>";
+
+  document.getElementById("stats").innerHTML =
+    '<div class="stat" style="grid-column:1/-1"><b>How hard is this sheet?</b><span class="nums">' +
+    "Best of " + CANDIDATES + " candidates per maze, scored on forks along the route times how far a wrong turn " +
+    "carries you before it is provably wrong — and weighted towards mazes that keep branching near the exit, " +
+    "since solving backwards from the goal is the usual shortcut. Not printed.</span></div>" + stats.join("");
+
+  fitToPage(grows, paper.h);
+
+  let pageStyle = document.getElementById("pageRule");
+  if (!pageStyle) { pageStyle = document.createElement("style"); pageStyle.id = "pageRule"; document.head.appendChild(pageStyle); }
+  pageStyle.textContent =
+    "@page { size: " + (state.paper === "a4" ? "A4" : "letter") + " portrait; margin: 12mm; }" +
+    "@media print { .sheet { width: " + (paper.w - 24) + "mm !important; } }";
+}
+
+render();
+
 })();
 </script>
 
